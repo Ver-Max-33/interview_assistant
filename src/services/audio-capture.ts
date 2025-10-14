@@ -17,6 +17,7 @@ export class AudioCaptureService {
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
+  private isPaused = false;
   
   public onAudioData?: (audioData: Float32Array) => void;
   public onError?: (error: string) => void;
@@ -113,7 +114,7 @@ export class AudioCaptureService {
           const audioCopy = new Float32Array(inputData);
           
           // コールバックを呼び出し
-          if (this.onAudioData) {
+          if (this.onAudioData && !this.isPaused) {
             this.onAudioData(audioCopy);
           }
           
@@ -146,6 +147,7 @@ export class AudioCaptureService {
       this.scriptProcessor.connect(dummyGain);
       dummyGain.connect(this.audioContext.destination);
       
+      this.isPaused = false;
       console.log('✅ 音声キャプチャ開始完了');
     } catch (error) {
       console.error('❌ 音声キャプチャ開始エラー:', error);
@@ -175,6 +177,47 @@ export class AudioCaptureService {
   stop(): void {
     console.log('🛑 音声キャプチャを停止');
     this.cleanup();
+  }
+
+  /**
+   * 一時停止
+   */
+  pause(): void {
+    if (!this.mediaStream || !this.audioContext || this.isPaused) {
+      return;
+    }
+
+    this.isPaused = true;
+    this.mediaStream.getTracks().forEach(track => {
+      track.enabled = false;
+    });
+
+    if (this.audioContext.state === 'running') {
+      this.audioContext.suspend().catch(err => {
+        console.warn('⚠️ AudioContext suspend error:', err);
+      });
+    }
+  }
+
+  /**
+   * 再開
+   */
+  resume(): void {
+    if (!this.mediaStream || !this.audioContext || !this.isPaused) {
+      return;
+    }
+
+    this.mediaStream.getTracks().forEach(track => {
+      track.enabled = true;
+    });
+
+    if (this.audioContext.state === 'suspended') {
+      this.audioContext.resume().catch(err => {
+        console.warn('⚠️ AudioContext resume error:', err);
+      });
+    }
+
+    this.isPaused = false;
   }
   
   /**
@@ -216,6 +259,8 @@ export class AudioCaptureService {
       });
       this.mediaStream = null;
     }
+
+    this.isPaused = false;
   }
   
   /**
@@ -234,4 +279,3 @@ export class AudioCaptureService {
 }
 
 export const audioCaptureService = new AudioCaptureService();
-

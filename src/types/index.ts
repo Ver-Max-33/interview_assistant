@@ -28,11 +28,6 @@ export interface AISettings {
   scriptPriority: 'exact' | 'similar';
 }
 
-export interface PrivacySettings {
-  saveConversation: boolean;
-  storagePath: string;
-}
-
 export interface DisplaySettings {
   fontSize: 'small' | 'medium' | 'large';
   theme: 'light' | 'dark';
@@ -68,7 +63,6 @@ export interface Settings {
   llmSettings: LLMSettings;
   audioSettings: AudioSettings;
   aiSettings: AISettings;
-  privacySettings: PrivacySettings;
   displaySettings: DisplaySettings;
 }
 
@@ -100,3 +94,12 @@ export interface MatchResult {
   source: 'exact' | 'similar' | 'none';
 }
 
+export interface InterviewSession {
+  conversation: Message[];
+  suggestions: Suggestion[];
+  interviewerSpeaker: 'spk1' | 'spk2' | null;
+  isIdentifying: boolean;
+  identificationTranscripts: Array<{ speaker: string; text: string }>;
+  savedAt: string;
+  summary?: string;
+}

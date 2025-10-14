@@ -22,7 +22,6 @@ export default function SettingsView({
   const [micTestResult, setMicTestResult] = useState<TestResult | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [showStorageInfo, setShowStorageInfo] = useState(false);
   
   // テーマ設定
   const isDark = settings.displaySettings.theme === 'dark';
@@ -662,76 +661,6 @@ export default function SettingsView({
                     </p>
                   </div>
                 </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Privacy Settings */}
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              プライバシー設定
-            </h3>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className="text-sm font-medium text-gray-900">会話履歴の保存</label>
-                  <p className="text-xs text-gray-500 mt-0.5">面接の文字起こしを保存します</p>
-                </div>
-                <button
-                  onClick={() => setSettings(prev => ({ 
-                    ...prev, 
-                    privacySettings: { ...prev.privacySettings, saveConversation: !prev.privacySettings.saveConversation }
-                  }))}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    settings.privacySettings.saveConversation ? 'bg-blue-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      settings.privacySettings.saveConversation ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-2">
-                  データ保存場所
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={settings.privacySettings.storagePath}
-                    onChange={(e) => setSettings(prev => ({ 
-                      ...prev, 
-                      privacySettings: { ...prev.privacySettings, storagePath: e.target.value }
-                    }))}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder="~/Documents/InterviewAssistant"
-                  />
-                  <button 
-                    onClick={() => {
-                      console.log('📁 保存場所選択ボタンがクリックされました');
-                      setShowStorageInfo(true);
-                      setTimeout(() => setShowStorageInfo(false), 3000);
-                    }}
-                    className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm hover:bg-blue-200 transition-colors font-medium"
-                  >
-                    選択
-                  </button>
-                </div>
-                {showStorageInfo && (
-                  <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                    <p className="text-xs text-blue-700">
-                      💡 現在はブラウザのLocalStorageに保存されています。<br/>
-                      カスタム保存場所の機能は将来のバージョンで実装予定です。
-                    </p>
-                  </div>
-                )}
-                <p className="text-xs text-gray-500 mt-1">
-                  ※ データはブラウザのLocalStorageに保存されます
-                </p>
               </div>
             </div>
           </div>

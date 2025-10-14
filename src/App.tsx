@@ -54,10 +54,6 @@ export default function App() {
       exampleAmount: 'normal',
       scriptPriority: 'similar'
     },
-    privacySettings: {
-      saveConversation: true,
-      storagePath: '~/Documents/InterviewAssistant'
-    },
     displaySettings: {
       fontSize: 'medium',
       theme: 'light',
@@ -139,4 +135,3 @@ export default function App() {
     </div>
   );
 }
-
