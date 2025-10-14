@@ -97,7 +97,7 @@ export interface MatchResult {
 export interface InterviewSession {
   conversation: Message[];
   suggestions: Suggestion[];
-  interviewerSpeaker: 'spk1' | 'spk2' | null;
+  interviewerSpeakers: string[]; // 面接官として識別された話者ID一覧
   isIdentifying: boolean;
   identificationTranscripts: Array<{ speaker: string; text: string }>;
   savedAt: string;

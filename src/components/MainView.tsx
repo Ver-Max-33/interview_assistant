@@ -84,7 +84,8 @@ export default function MainView({
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string>('');
   const [audioLevel, setAudioLevel] = useState(0);
-  const [interviewerSpeaker, setInterviewerSpeaker] = useState<'spk1' | 'spk2' | null>(null);
+  const [interviewerSpeakers, setInterviewerSpeakers] = useState<string[]>([]);
+  const [detectedSpeakers, setDetectedSpeakers] = useState<string[]>([]);
   const [isIdentifying, setIsIdentifying] = useState(true);
   const [isActuallyIdentifying, setIsActuallyIdentifying] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -95,7 +96,7 @@ export default function MainView({
   const [isCompact, setIsCompact] = useState(false);
 
   const lastInterviewerQuestionRef = useRef<string>('');
-  const interviewerSpeakerRef = useRef<'spk1' | 'spk2' | null>(null);
+  const interviewerSpeakersRef = useRef<Set<string>>(new Set());
   const isIdentifyingRef = useRef<boolean>(true);
   const isActuallyIdentifyingRef = useRef<boolean>(false);
   const hasIdentifiedRef = useRef<boolean>(false);
@@ -106,6 +107,7 @@ export default function MainView({
   const activeMessageMapRef = useRef<Record<string, string>>({});
   const lastFinalInfoRef = useRef<Record<string, { timestamp: number; messageId: string }>>({});
   const headerSummaryGeneratedRef = useRef<boolean>(false);
+  const detectedSpeakersRef = useRef<Set<string>>(new Set());
 
   const keywords = useMemo(() => extractKeywords(preparationData), [preparationData]);
 
@@ -158,6 +160,15 @@ export default function MainView({
     },
     [keywordRegex, keywordLookup]
   );
+
+  const formatSpeakerLabel = useCallback((speakerId: string | null | undefined) => {
+    if (!speakerId) {
+      return 'Speaker';
+    }
+    return speakerId.startsWith('spk')
+      ? `Speaker ${speakerId.replace('spk', '')}`
+      : speakerId;
+  }, []);
 
   useEffect(() => {
     setCompanySummary(buildDefaultHeaderSummary(preparationData));
@@ -273,28 +284,23 @@ export default function MainView({
   }, []);
 
   useEffect(() => {
-    if (conversation.length === 0 && suggestions.length === 0 && !interviewerSpeaker) {
+    if (conversation.length === 0 && suggestions.length === 0 && interviewerSpeakers.length === 0) {
       storageService.clearSession();
     }
-  }, [conversation.length, suggestions.length, interviewerSpeaker]);
+  }, [conversation.length, suggestions.length, interviewerSpeakers.length]);
 
-  const updateConversationRoles = useCallback(
-    (identifiedSpeaker: 'spk1' | 'spk2' | null) => {
-      if (!identifiedSpeaker) {
-        return;
-      }
-      setConversation(prev =>
-        prev.map(item => {
-          if (!item.originalSpeaker) return item;
-          return {
-            ...item,
-            speaker: item.originalSpeaker === identifiedSpeaker ? 'interviewer' : 'user'
-          };
-        })
-      );
-    },
-    []
-  );
+  const updateConversationRoles = useCallback((identifiedSpeakers: Iterable<string> = []) => {
+    const interviewerSet = new Set(Array.from(identifiedSpeakers));
+    setConversation(prev =>
+      prev.map(item => {
+        if (!item.originalSpeaker) return item;
+        return {
+          ...item,
+          speaker: interviewerSet.has(item.originalSpeaker) ? 'interviewer' : 'user'
+        };
+      })
+    );
+  }, []);
 
   const identifyInterviewer = useCallback(async () => {
     if (hasIdentifiedRef.current) {
@@ -302,84 +308,108 @@ export default function MainView({
       return;
     }
 
-    if (identificationTranscriptsRef.current.length === 0) {
+    const transcripts = identificationTranscriptsRef.current;
+    if (transcripts.length === 0) {
       console.warn('⚠️ 識別用の転写データがありません');
+      return;
+    }
+
+    const uniqueSpeakers = Array.from(
+      new Set(transcripts.map(t => t.speaker).filter(Boolean))
+    );
+    if (uniqueSpeakers.length === 0) {
+      console.warn('⚠️ 話者情報が取得できませんでした');
       return;
     }
 
     setIsActuallyIdentifying(true);
     isActuallyIdentifyingRef.current = true;
-    console.log(
-      '🔍 LLMで面接官を識別中...',
-      identificationTranscriptsRef.current.length,
-      '件の転写'
-    );
+    console.log('🔍 LLMで面接官を識別中...', transcripts.length, '件の転写');
+
+    const questionCount: Record<string, number> = {};
+    transcripts.forEach(t => {
+      if (!questionCount[t.speaker]) {
+        questionCount[t.speaker] = 0;
+      }
+      if (/[？?]/.test(t.text)) {
+        questionCount[t.speaker] += 1;
+      }
+    });
+
+    const fallbackSpeaker = uniqueSpeakers.reduce((prev, curr) => {
+      const prevScore = questionCount[prev] ?? 0;
+      const currScore = questionCount[curr] ?? 0;
+      if (currScore === prevScore) {
+        return prev;
+      }
+      return currScore > prevScore ? curr : prev;
+    }, uniqueSpeakers[0]);
 
     try {
-      const conversationText = identificationTranscriptsRef.current
-        .map(t => `${t.speaker}: ${t.text}`)
-        .join('\n');
+      const conversationText = transcripts.map(t => `${t.speaker}: ${t.text}`).join('\n');
 
-      const prompt = `以下は会話の転写です。2人の話者がいます。どちらが面接官（質問する側）で、どちらが候補者（回答する側）か判断してください。
+      const prompt = `以下は会話の転写です。話者は ${uniqueSpeakers.join(
+        ', '
+      )} として識別されています。面接官（質問する側）がどの話者かをすべて特定してください。複数の面接官が存在しても構いません。
 
 会話:
 ${conversationText}
 
-上記の会話を分析して、どちらの話者が面接官か判断してください。
-- spk1が面接官の場合は「spk1」とだけ答えてください
-- spk2が面接官の場合は「spk2」とだけ答えてください
-
-回答（spk1またはspk2のみ）:`;
+出力形式: JSONのみで回答してください。例えば {"interviewers":["spk1","spk3"]} のように、面接官と思われる話者IDを "interviewers" 配列に列挙してください。最低でも1名は必ず含めてください。`;
 
       const messages: LLMMessage[] = [
         {
           role: 'system',
           content:
-            'あなたは会話分析の専門家です。会話の転写から面接官を識別してください。回答は「spk1」または「spk2」のみでお願いします。'
+            'あなたは会話分析の専門家です。面接官に該当する話者をすべてJSONで返してください。応答は必ず {"interviewers":["spk1","spk2"]} のような形式のみで行ってください。'
         },
         { role: 'user', content: prompt }
       ];
 
-      const answer = await llmService.generateResponse(messages);
-      const cleanAnswer = answer.trim().toLowerCase();
+      const rawAnswer = await llmService.generateResponse(messages);
+      const answer = rawAnswer.trim();
+      const jsonMatch = answer.match(/\{[\s\S]*\}/);
+      const jsonString = jsonMatch ? jsonMatch[0] : answer;
+      const parsed = JSON.parse(jsonString);
 
-      let identifiedSpeaker: 'spk1' | 'spk2';
+      const candidates = Array.isArray(parsed?.interviewers) ? parsed.interviewers : [];
+      const identified = candidates
+        .map((s: unknown) => (typeof s === 'string' ? s.trim() : ''))
+        .filter(s => s && uniqueSpeakers.includes(s));
 
-      if (cleanAnswer.includes('spk2')) {
-        identifiedSpeaker = 'spk2';
-      } else {
-        identifiedSpeaker = 'spk1';
-      }
+      const finalInterviewers = identified.length > 0 ? identified : [fallbackSpeaker];
 
       hasIdentifiedRef.current = true;
-      interviewerSpeakerRef.current = identifiedSpeaker;
-      setInterviewerSpeaker(identifiedSpeaker);
+      interviewerSpeakersRef.current = new Set(finalInterviewers);
+      setInterviewerSpeakers(finalInterviewers);
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
       setIsActuallyIdentifying(false);
       isActuallyIdentifyingRef.current = false;
       setElapsedSeconds(60);
 
-      updateConversationRoles(identifiedSpeaker);
+      updateConversationRoles(finalInterviewers);
     } catch (err) {
       console.error('❌ 面接官識別エラー:', err);
       hasIdentifiedRef.current = true;
-      interviewerSpeakerRef.current = 'spk1';
-      setInterviewerSpeaker('spk1');
+      interviewerSpeakersRef.current = new Set([fallbackSpeaker]);
+      setInterviewerSpeakers([fallbackSpeaker]);
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
       setIsActuallyIdentifying(false);
       isActuallyIdentifyingRef.current = false;
       setElapsedSeconds(60);
-      updateConversationRoles('spk1');
+      updateConversationRoles([fallbackSpeaker]);
     }
   }, [updateConversationRoles]);
 
   const clearSessionState = () => {
     setConversation([]);
     setSuggestions([]);
-    setInterviewerSpeaker(null);
-    interviewerSpeakerRef.current = null;
+    setInterviewerSpeakers([]);
+    interviewerSpeakersRef.current = new Set();
+    setDetectedSpeakers([]);
+    detectedSpeakersRef.current = new Set();
     setIsIdentifying(true);
     isIdentifyingRef.current = true;
     setIsActuallyIdentifying(false);
@@ -437,6 +467,11 @@ ${conversationText}
           return;
         }
 
+        if (!detectedSpeakersRef.current.has(speaker)) {
+          detectedSpeakersRef.current.add(speaker);
+          setDetectedSpeakers(prev => (prev.includes(speaker) ? prev : [...prev, speaker]));
+        }
+
         const trimmedText = text.trim();
 
         if (!trimmedText && isFinal) {
@@ -480,10 +515,8 @@ ${conversationText}
         }
 
         let speakerRole: 'user' | 'interviewer';
-
-        if (interviewerSpeakerRef.current) {
-          speakerRole =
-            speaker === interviewerSpeakerRef.current ? 'interviewer' : 'user';
+        if (interviewerSpeakersRef.current.size > 0) {
+          speakerRole = interviewerSpeakersRef.current.has(speaker) ? 'interviewer' : 'user';
         } else {
           speakerRole = speaker === 'spk1' ? 'interviewer' : 'user';
         }
@@ -561,8 +594,7 @@ ${conversationText}
           !isIdentifyingRef.current && isFinal && trimmedText.length > 0;
 
         if (shouldCheckLLM) {
-          const currentInterviewer = interviewerSpeakerRef.current;
-          if (currentInterviewer && speaker === currentInterviewer) {
+          if (interviewerSpeakersRef.current.has(speaker)) {
             lastInterviewerQuestionRef.current = trimmedText;
             generateSuggestion(trimmedText);
           }
@@ -908,16 +940,28 @@ const handleStopRecording = () => {
     ]
   );
 
-  const manuallySetInterviewer = (speaker: 'spk1' | 'spk2') => {
-    interviewerSpeakerRef.current = speaker;
-    setInterviewerSpeaker(speaker);
+  const toggleInterviewerSpeaker = (speaker: string) => {
+    const nextSet = new Set(interviewerSpeakersRef.current);
+    if (nextSet.has(speaker)) {
+      nextSet.delete(speaker);
+      if (nextSet.size === 0) {
+        console.warn('⚠️ 少なくとも1人の面接官を選択する必要があります');
+        nextSet.add(speaker);
+      }
+    } else {
+      nextSet.add(speaker);
+    }
+
+    const nextList = Array.from(nextSet);
+    interviewerSpeakersRef.current = nextSet;
+    setInterviewerSpeakers(nextList);
     setIsIdentifying(false);
     isIdentifyingRef.current = false;
     setIsActuallyIdentifying(false);
     isActuallyIdentifyingRef.current = false;
     hasIdentifiedRef.current = true;
     setElapsedSeconds(60);
-    updateConversationRoles(speaker);
+    updateConversationRoles(nextList);
   };
 
   const handleReidentify = () => {
@@ -939,8 +983,9 @@ const handleStopRecording = () => {
     isIdentifyingRef.current = true;
     setIsActuallyIdentifying(false);
     isActuallyIdentifyingRef.current = false;
-    setInterviewerSpeaker(null);
-    interviewerSpeakerRef.current = null;
+    setInterviewerSpeakers([]);
+    interviewerSpeakersRef.current = new Set();
+    updateConversationRoles([]);
     setElapsedSeconds(0);
     startTimeRef.current = Date.now();
     pausedDurationRef.current = 0;
@@ -1094,20 +1139,24 @@ const handleStopRecording = () => {
                 <p className={`text-xs ${themeClasses.textMuted} mt-1`}>リアルタイム転写とAIサポート</p>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                {!isCompact && (
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => manuallySetInterviewer('spk1')}
-                      className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-                    >
-                      Speaker 1 は面接官
-                    </button>
-                    <button
-                      onClick={() => manuallySetInterviewer('spk2')}
-                      className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-                    >
-                      Speaker 2 は面接官
-                    </button>
+                {!isCompact && detectedSpeakers.length > 0 && (
+                  <div className="flex gap-2 flex-wrap">
+                    {detectedSpeakers.map(speakerId => {
+                      const isActive = interviewerSpeakers.includes(speakerId);
+                      return (
+                        <button
+                          key={speakerId}
+                          onClick={() => toggleInterviewerSpeaker(speakerId)}
+                          className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                            isActive
+                              ? 'bg-blue-600 text-white hover:bg-blue-700'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          {formatSpeakerLabel(speakerId)} を{isActive ? '面接官から外す' : '面接官に設定'}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
                 {!isCompact && (
@@ -1171,20 +1220,18 @@ const handleStopRecording = () => {
                   面接官を識別中...
                 </span>
               )}
-              {isRecording && !isIdentifying && interviewerSpeaker && (
+              {isRecording && !isIdentifying && interviewerSpeakers.length > 0 && (
                 <span className="flex items-center gap-2 text-xs px-3 py-1.5 bg-green-50 border border-green-200 rounded-full text-green-700">
                   <Check className="w-3.5 h-3.5" />
-                  面接官: {interviewerSpeaker === 'spk1' ? 'Speaker 1' : 'Speaker 2'}
+                  面接官: {interviewerSpeakers.map(formatSpeakerLabel).join(', ')}
                 </span>
               )}
               {isRecording && currentSpeaker && (
                 <span className="flex items-center gap-2 text-xs px-3 py-1.5 bg-red-50 border border-red-200 rounded-full text-red-700">
                   <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
                   {isIdentifying
-                    ? currentOriginalSpeaker === 'spk1'
-                      ? 'Speaker 1 が話しています'
-                      : currentOriginalSpeaker === 'spk2'
-                      ? 'Speaker 2 が話しています'
+                    ? currentOriginalSpeaker
+                      ? `${formatSpeakerLabel(currentOriginalSpeaker)} が話しています`
                       : '話者識別中'
                     : currentSpeaker === 'interviewer'
                     ? '面接官が話しています'
@@ -1249,11 +1296,7 @@ const handleStopRecording = () => {
                             }`}
                           >
                             {isIdentifying
-                              ? item.originalSpeaker === 'spk1'
-                                ? 'Speaker 1'
-                                : item.originalSpeaker === 'spk2'
-                                ? 'Speaker 2'
-                                : 'Speaker'
+                              ? formatSpeakerLabel(item.originalSpeaker)
                               : item.speaker === 'interviewer'
                               ? '面接官'
                               : 'あなた'}

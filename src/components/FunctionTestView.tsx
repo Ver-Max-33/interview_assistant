@@ -45,8 +45,10 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
   const lastInterviewerQuestionRef = useRef<string>('');
   
   // 面接官の識別状態
-  const [interviewerSpeaker, setInterviewerSpeaker] = useState<'spk1' | 'spk2' | null>(null);
-  const interviewerSpeakerRef = useRef<'spk1' | 'spk2' | null>(null); // refで管理してコールバックで最新値を使用
+  const [interviewerSpeakers, setInterviewerSpeakers] = useState<string[]>([]);
+  const interviewerSpeakersRef = useRef<Set<string>>(new Set()); // 最新の面接官集合
+  const [detectedSpeakers, setDetectedSpeakers] = useState<string[]>([]);
+  const detectedSpeakersRef = useRef<Set<string>>(new Set());
   const [isIdentifying, setIsIdentifying] = useState(true);
   const isIdentifyingRef = useRef<boolean>(true); // refで管理してコールバックで最新値を使用
   const hasIdentifiedRef = useRef<boolean>(false); // 識別済みフラグ
@@ -154,6 +156,15 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
     [keywordRegex, keywordLookup]
   );
 
+  const formatSpeakerLabel = useCallback((speakerId: string | null | undefined) => {
+    if (!speakerId) {
+      return 'Speaker';
+    }
+    return speakerId.startsWith('spk')
+      ? `Speaker ${speakerId.replace('spk', '')}`
+      : speakerId;
+  }, []);
+
   useEffect(() => {
     if (!isIdentifying) {
       setElapsedSeconds(60);
@@ -171,121 +182,146 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
     return () => window.clearInterval(interval);
   }, [isIdentifying]);
 
-  const updateTranscriptRoles = useCallback((identifiedSpeaker: 'spk1' | 'spk2') => {
+  const updateTranscriptRoles = useCallback((identifiedSpeakers: Iterable<string> = []) => {
+    const interviewerSet = new Set(Array.from(identifiedSpeakers));
     setTranscripts(prev =>
       prev.map(item => ({
         ...item,
-        speaker: item.originalSpeaker === identifiedSpeaker ? 'interviewer' : 'user'
+        speaker: interviewerSet.has(item.originalSpeaker) ? 'interviewer' : 'user'
       }))
     );
   }, []);
 
   // LLMで面接官を識別
   const identifyInterviewer = async () => {
-    // 既に識別済みの場合はスキップ
     if (hasIdentifiedRef.current) {
       console.log('✅ 既に識別済みのためスキップ');
       return;
     }
-    
-    hasIdentifiedRef.current = true; // 識別開始をマーク
-    
-    if (identificationTranscriptsRef.current.length === 0) {
+
+    const transcriptsForIdentification = identificationTranscriptsRef.current;
+    if (transcriptsForIdentification.length === 0) {
       console.warn('⚠️ 識別用の転写データがありません');
       return;
     }
 
-    console.log('🔍 LLMで面接官を識別中...', identificationTranscriptsRef.current.length, '件の転写');
+    const uniqueSpeakers = Array.from(
+      new Set(transcriptsForIdentification.map(t => t.speaker).filter(Boolean))
+    );
+    if (uniqueSpeakers.length === 0) {
+      console.warn('⚠️ 話者情報が取得できませんでした');
+      return;
+    }
+
+    hasIdentifiedRef.current = true;
+    console.log('🔍 LLMで面接官を識別中...', transcriptsForIdentification.length, '件の転写');
     setStatus('面接官を識別中...');
 
+    const questionCount: Record<string, number> = {};
+    transcriptsForIdentification.forEach(t => {
+      if (!questionCount[t.speaker]) {
+        questionCount[t.speaker] = 0;
+      }
+      if (/[？?]/.test(t.text)) {
+        questionCount[t.speaker] += 1;
+      }
+    });
+
+    const fallbackSpeaker = uniqueSpeakers.reduce((prev, curr) => {
+      const prevScore = questionCount[prev] ?? 0;
+      const currScore = questionCount[curr] ?? 0;
+      if (currScore === prevScore) {
+        return prev;
+      }
+      return currScore > prevScore ? curr : prev;
+    }, uniqueSpeakers[0]);
+
     try {
-      // 転写データを整形
-      const conversationText = identificationTranscriptsRef.current
+      const conversationText = transcriptsForIdentification
         .map(t => `${t.speaker}: ${t.text}`)
         .join('\n');
 
-      const prompt = `以下は会話の転写です。2人の話者がいます。どちらが面接官（質問する側）で、どちらが候補者（回答する側）か判断してください。
+      const prompt = `以下は会話の転写です。話者は ${uniqueSpeakers.join(
+        ', '
+      )} として識別されています。面接官（質問する側）がどの話者かをすべて特定してください。複数人でも構いません。
 
 会話:
 ${conversationText}
 
-上記の会話を分析して、どちらの話者が面接官か判断してください。
-- spk1が面接官の場合は「spk1」とだけ答えてください
-- spk2が面接官の場合は「spk2」とだけ答えてください
-
-回答（spk1またはspk2のみ）:`;
+出力形式: JSONのみで回答してください。例えば {"interviewers":["spk1","spk3"]} のように、面接官と思われる話者IDを "interviewers" 配列に列挙してください。最低でも1名は必ず含めてください。`;
 
       const messages: LLMMessage[] = [
-        { 
-          role: 'system', 
-          content: 'あなたは会話分析の専門家です。会話の転写から面接官を識別してください。回答は「spk1」または「spk2」のみでお願いします。'
+        {
+          role: 'system',
+          content:
+            'あなたは会話分析の専門家です。面接官に該当する話者をすべてJSONで返してください。応答は必ず {"interviewers":["spk1","spk2"]} のような形式のみで行ってください。'
         },
         { role: 'user', content: prompt }
       ];
 
-      const answer = await llmService.generateResponse(messages);
-      const cleanAnswer = answer.trim().toLowerCase();
+      const rawAnswer = await llmService.generateResponse(messages);
+      const answer = rawAnswer.trim();
+      const jsonMatch = answer.match(/\{[\s\S]*\}/);
+      const jsonString = jsonMatch ? jsonMatch[0] : answer;
+      const parsed = JSON.parse(jsonString);
 
-      console.log('🤖 LLM識別結果:', answer);
+      const candidates = Array.isArray(parsed?.interviewers) ? parsed.interviewers : [];
+      const identified = candidates
+        .map((s: unknown) => (typeof s === 'string' ? s.trim() : ''))
+        .filter(s => s && uniqueSpeakers.includes(s));
 
-      let identifiedSpeaker: 'spk1' | 'spk2';
-      
-      if (cleanAnswer.includes('spk1')) {
-        identifiedSpeaker = 'spk1';
-        setStatus('面接官識別完了: spk1');
-        console.log('✅ spk1を面接官として識別');
-      } else if (cleanAnswer.includes('spk2')) {
-        identifiedSpeaker = 'spk2';
-        setStatus('面接官識別完了: spk2');
-        console.log('✅ spk2を面接官として識別');
-      } else {
-        identifiedSpeaker = 'spk1';
-        console.warn('⚠️ 識別結果が不明確です。デフォルトでspk1を面接官とします');
-        setStatus('面接官識別完了: spk1 (デフォルト)');
-      }
+      const finalInterviewers = identified.length > 0 ? identified : [fallbackSpeaker];
 
-      // refとstateを更新
-      interviewerSpeakerRef.current = identifiedSpeaker;
-      setInterviewerSpeaker(identifiedSpeaker);
-      
+      interviewerSpeakersRef.current = new Set(finalInterviewers);
+      setInterviewerSpeakers(finalInterviewers);
+      updateTranscriptRoles(finalInterviewers);
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
       setElapsedSeconds(60);
+      setStatus(
+        `面接官識別完了: ${finalInterviewers.map(id => formatSpeakerLabel(id)).join(', ')}`
+      );
       setDebugInfo('面接官識別完了');
-      
-      console.log(`🔄 転写項目を更新中... 面接官: ${identifiedSpeaker}`);
-      
-      updateTranscriptRoles(identifiedSpeaker);
-      
     } catch (err) {
       console.error('❌ 面接官識別エラー:', err);
-      // エラーの場合もデフォルトでspk1を面接官とする
-      const identifiedSpeaker: 'spk1' = 'spk1';
-      
-      interviewerSpeakerRef.current = identifiedSpeaker;
-      setInterviewerSpeaker(identifiedSpeaker);
+      const fallbackList = [fallbackSpeaker];
+      interviewerSpeakersRef.current = new Set(fallbackList);
+      setInterviewerSpeakers(fallbackList);
+      updateTranscriptRoles(fallbackList);
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
       setElapsedSeconds(60);
-      setStatus('面接官識別完了: spk1 (エラー時デフォルト)');
+      setStatus(
+        `面接官識別完了: ${formatSpeakerLabel(fallbackSpeaker)} (エラー時デフォルト)`
+      );
       setDebugInfo('識別エラー、デフォルト設定適用');
-      
-      console.log(`🔄 転写項目を更新中... 面接官: ${identifiedSpeaker} (エラー時)`);
-      
-      updateTranscriptRoles(identifiedSpeaker);
     }
   };
 
-  const manuallySetInterviewer = (speaker: 'spk1' | 'spk2') => {
-    interviewerSpeakerRef.current = speaker;
-    setInterviewerSpeaker(speaker);
+  const toggleInterviewerSpeaker = (speaker: string) => {
+    const nextSet = new Set(interviewerSpeakersRef.current);
+    if (nextSet.has(speaker)) {
+      nextSet.delete(speaker);
+      if (nextSet.size === 0) {
+        console.warn('⚠️ 少なくとも1人の面接官を選択する必要があります');
+        nextSet.add(speaker);
+      }
+    } else {
+      nextSet.add(speaker);
+    }
+
+    const nextList = Array.from(nextSet);
+    interviewerSpeakersRef.current = nextSet;
+    setInterviewerSpeakers(nextList);
     setIsIdentifying(false);
     isIdentifyingRef.current = false;
     hasIdentifiedRef.current = true;
     setElapsedSeconds(60);
-    setStatus(`面接官識別完了: ${speaker === 'spk1' ? 'Speaker 1' : 'Speaker 2'} (手動設定)`);
+    setStatus(
+      `面接官識別完了: ${nextList.map(id => formatSpeakerLabel(id)).join(', ')} (手動設定)`
+    );
     setDebugInfo('手動で面接官を設定しました');
-    updateTranscriptRoles(speaker);
+    updateTranscriptRoles(nextList);
   };
 
   const handleReidentify = () => {
@@ -303,8 +339,9 @@ ${conversationText}
 
     identificationTranscriptsRef.current = transcriptsForIdentification;
     hasIdentifiedRef.current = false;
-    setInterviewerSpeaker(null);
-    interviewerSpeakerRef.current = null;
+    setInterviewerSpeakers([]);
+    interviewerSpeakersRef.current = new Set();
+    updateTranscriptRoles([]);
     setIsIdentifying(true);
     isIdentifyingRef.current = true;
     setElapsedSeconds(0);
@@ -360,8 +397,10 @@ ${conversationText}
       setDebugInfo('');
       
       // 識別状態をリセット
-      setInterviewerSpeaker(null);
-      interviewerSpeakerRef.current = null;
+      setInterviewerSpeakers([]);
+      interviewerSpeakersRef.current = new Set();
+      setDetectedSpeakers([]);
+      detectedSpeakersRef.current = new Set();
       setIsIdentifying(true);
       isIdentifyingRef.current = true; // refもリセット
       hasIdentifiedRef.current = false; // 識別フラグをリセット
@@ -389,11 +428,20 @@ ${conversationText}
       // Soniox STTコールバックを設定
       sonioxService.onTranscript = (text: string, isFinal: boolean, speaker?: string) => {
         const trimmedText = text.trim();
-        console.log(`📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSpeakerRef.current}]:`, trimmedText.substring(0, 50));
+        const interviewerSnapshot = Array.from(interviewerSpeakersRef.current.values());
+        console.log(
+          `📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSnapshot.join(',') || '未設定'}]:`,
+          trimmedText.substring(0, 50)
+        );
 
         if (!speaker) {
           console.warn('⚠️ speaker が空です');
           return;
+        }
+
+        if (!detectedSpeakersRef.current.has(speaker)) {
+          detectedSpeakersRef.current.add(speaker);
+          setDetectedSpeakers(prev => (prev.includes(speaker) ? prev : [...prev, speaker]));
         }
 
         if (!trimmedText && isFinal) {
@@ -430,10 +478,12 @@ ${conversationText}
 
         let speakerRole: 'user' | 'interviewer';
 
-        if (interviewerSpeakerRef.current) {
-          const isMatch = speaker === interviewerSpeakerRef.current;
+        if (interviewerSpeakersRef.current.size > 0) {
+          const isMatch = interviewerSpeakersRef.current.has(speaker);
           speakerRole = isMatch ? 'interviewer' : 'user';
-          console.log(`👤 話者判定 [識別済み]: "${speaker}" === "${interviewerSpeakerRef.current}"? ${isMatch} → role=${speakerRole}`);
+          console.log(
+            `👤 話者判定 [識別済み]: speaker=${speaker}, 面接官集合=${interviewerSnapshot.join(',')} → role=${speakerRole}`
+          );
         } else {
           speakerRole = speaker === 'spk1' ? 'interviewer' : 'user';
           console.log(`👤 話者判定 [識別中]: speaker=${speaker}, 暫定role=${speakerRole}`);
@@ -505,15 +555,24 @@ ${conversationText}
         console.log(`🔍 LLM処理条件チェック: isIdentifying=${isIdentifyingRef.current}, isFinal=${isFinal}, hasText=${trimmedText.length > 0}, shouldCheck=${shouldCheckLLM}`);
 
         if (shouldCheckLLM) {
-          const currentInterviewer = interviewerSpeakerRef.current;
-          console.log(`🔍 詳細チェック: speaker=${speaker}, interviewer=${currentInterviewer}, match=${speaker === currentInterviewer}`);
+          const isInterviewer = interviewerSpeakersRef.current.has(speaker);
+          console.log(
+            `🔍 詳細チェック: speaker=${speaker}, interviewers=${interviewerSnapshot.join(
+              ','
+            )}, match=${isInterviewer}`
+          );
 
-          if (currentInterviewer && speaker === currentInterviewer) {
+          if (isInterviewer) {
             lastInterviewerQuestionRef.current = trimmedText;
-            console.log('💬 ✅ 面接官の質問を検出、LLM処理開始:', trimmedText.substring(0, 50) + '...');
+            console.log(
+              '💬 ✅ 面接官の質問を検出、LLM処理開始:',
+              trimmedText.substring(0, 50) + '...'
+            );
             handleLLMResponse(trimmedText);
           } else {
-            console.log(`📝 ❌ 非面接官の発言またはインタビュアー未設定: speaker=${speaker}, interviewer=${currentInterviewer}`);
+            console.log(
+              `📝 ❌ 非面接官の発言またはインタビュアー未設定: speaker=${speaker}, interviewers=${interviewerSnapshot.join(',')}`
+            );
           }
         } else {
           if (isIdentifyingRef.current) {
@@ -728,7 +787,7 @@ ${conversationText}
                   <>
                     <CheckCircle className="w-3 h-3 text-green-600" />
                     <span className="text-xs font-medium text-green-700">
-                      面接官: {interviewerSpeaker === 'spk1' ? 'Speaker 1' : 'Speaker 2'}
+                      面接官: {interviewerSpeakers.length > 0 ? interviewerSpeakers.map(formatSpeakerLabel).join(', ') : '未設定'}
                     </span>
                   </>
                 )}
@@ -780,20 +839,26 @@ ${conversationText}
                     <span className="text-xs font-mono text-gray-600">{audioLevel}%</span>
                   </div>
                 )}
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => manuallySetInterviewer('spk1')}
-                    className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-                  >
-                    Speaker 1 は面接官
-                  </button>
-                  <button
-                    onClick={() => manuallySetInterviewer('spk2')}
-                    className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-                  >
-                    Speaker 2 は面接官
-                  </button>
-                </div>
+                {detectedSpeakers.length > 0 && (
+                  <div className="flex gap-2 flex-wrap">
+                    {detectedSpeakers.map(speakerId => {
+                      const isActive = interviewerSpeakers.includes(speakerId);
+                      return (
+                        <button
+                          key={speakerId}
+                          onClick={() => toggleInterviewerSpeaker(speakerId)}
+                          className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                            isActive
+                              ? 'bg-blue-600 text-white hover:bg-blue-700'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          {formatSpeakerLabel(speakerId)} を{isActive ? '面接官から外す' : '面接官に設定'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <button
                   onClick={handleReidentify}
                   className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors"
@@ -843,11 +908,7 @@ ${conversationText}
                           item.speaker === 'interviewer' ? 'text-blue-700' : 'text-green-700'
                         }`}>
                           {isIdentifying ? (
-                            item.originalSpeaker === 'spk1'
-                              ? 'Speaker 1'
-                              : item.originalSpeaker === 'spk2'
-                              ? 'Speaker 2'
-                              : 'Speaker ' + item.originalSpeaker.replace('spk', '')
+                            formatSpeakerLabel(item.originalSpeaker)
                           ) : item.speaker === 'interviewer' ? (
                             '面接官'
                           ) : (

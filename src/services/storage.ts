@@ -94,7 +94,19 @@ export class StorageService {
     try {
       const data = localStorage.getItem(StorageService.SESSION_KEY);
       if (!data) return null;
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+
+      // 旧データとの互換性確保: interviewerSpeaker → interviewerSpeakers
+      if (parsed && !parsed.interviewerSpeakers) {
+        if (parsed.interviewerSpeaker) {
+          parsed.interviewerSpeakers = [parsed.interviewerSpeaker];
+        } else {
+          parsed.interviewerSpeakers = [];
+        }
+        delete parsed.interviewerSpeaker;
+      }
+
+      return parsed;
     } catch (error) {
       console.error('セッションの読み込みに失敗しました:', error);
       return null;
