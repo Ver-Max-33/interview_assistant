@@ -1469,10 +1469,10 @@ const handleStopRecording = () => {
 
       const compact = new WebviewWindow('compact-view', {
         url: compactUrl,
-        width: 360,
-        height: 720,
-        minWidth: 320,
-        minHeight: 560,
+        width: 440,
+        height: 860,
+        minWidth: 380,
+        minHeight: 640,
         resizable: true,
         decorations: false,
         transparent: true,
@@ -1489,7 +1489,7 @@ const handleStopRecording = () => {
             mainAppWindow.outerSize()
           ]);
           const margin = 24;
-          const desiredWidth = 360;
+          const desiredWidth = 440;
           const targetX = Math.max(mainPosition.x + mainSize.width - desiredWidth - margin, 0);
           const targetY = Math.max(mainPosition.y + margin, 0);
 

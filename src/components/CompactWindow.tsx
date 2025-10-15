@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Zap, Maximize2, Droplet } from 'lucide-react';
+import { Zap, Maximize2 } from 'lucide-react';
 import type { Message, Settings as SettingsType, Suggestion } from '../types';
 
 type CompactChannelMessage =
@@ -26,15 +26,11 @@ interface CompactStatePayload {
 }
 
 const CHANNEL_NAME = 'compact-view-channel';
-const OPACITY_STORAGE_KEY = 'compact-window-opacity';
-
 export default function CompactWindow() {
   const [state, setState] = useState<CompactStatePayload | null>(null);
-  const [opacity, setOpacity] = useState<number>(() => {
-    const saved = localStorage.getItem(OPACITY_STORAGE_KEY);
-    return saved ? Number(saved) : 0.95;
-  });
   const channelRef = useRef<BroadcastChannel | null>(null);
+  const micPrimedRef = useRef(false);
+  const [micError, setMicError] = useState<string | null>(null);
 
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
@@ -78,9 +74,8 @@ export default function CompactWindow() {
       sectionBorder: isDark ? 'border-slate-800/60' : 'border-slate-200/80',
       subtleBorder: isDark ? 'border-slate-800/40' : 'border-slate-200/60',
       sectionSubtleBg: isDark ? 'bg-slate-900/40' : 'bg-slate-100/60',
-      accentBg: isDark ? 'bg-blue-950/40' : 'bg-blue-50',
+      accentBg: isDark ? 'bg-blue-950/35' : 'bg-blue-50',
       accentBorder: isDark ? 'border-blue-900/60' : 'border-blue-200',
-      sliderAccent: isDark ? 'accent-blue-300' : 'accent-blue-500',
       hoverMuted: isDark ? 'hover:bg-slate-800/70' : 'hover:bg-slate-100/70',
       buttonMutedBg: isDark ? 'bg-slate-800/70' : 'bg-slate-100/80',
       dividerBorder: isDark ? 'border-slate-900/40' : 'border-slate-200/60'
@@ -114,16 +109,24 @@ export default function CompactWindow() {
 
     const role = state.currentSpeaker ?? state.latestMessage?.speaker ?? null;
     const original = state.currentOriginalSpeaker ?? state.latestMessage?.originalSpeaker ?? null;
-    const label =
-      role === 'interviewer' ? '面接官' : role === 'user' ? 'あなた' : '待機中';
+    const hasSpeakerMapping = Boolean(state.interviewerSpeaker);
 
-    let detail = '話者未判定';
+    let label = '待機中';
+    if (role) {
+      label = hasSpeakerMapping
+        ? role === 'interviewer'
+          ? '面接官'
+          : 'あなた'
+        : '判定中';
+    }
+
+    let detail = hasSpeakerMapping ? '話者未判定' : '話者の特定中';
     if (original) {
       const base = original.startsWith('spk')
         ? `Speaker ${original.replace('spk', '')}`
         : original;
-      if (!state.interviewerSpeaker) {
-        detail = base;
+      if (!hasSpeakerMapping) {
+        detail = `判定中 (${base})`;
       } else {
         detail =
           original === state.interviewerSpeaker
@@ -133,18 +136,21 @@ export default function CompactWindow() {
     }
 
     const indicatorClass =
-      role === 'interviewer'
-        ? 'bg-blue-500'
-        : role === 'user'
-        ? 'bg-green-500'
+      role && hasSpeakerMapping
+        ? role === 'interviewer'
+          ? 'bg-blue-500'
+          : 'bg-green-500'
         : 'bg-gray-400';
 
     const latestTimestamp = state.latestMessage?.timestamp ?? '';
+    const latestRole = state.latestMessage?.speaker ?? null;
     const latestLabel =
-      state.latestMessage?.speaker === 'interviewer'
-        ? '面接官'
-        : state.latestMessage?.speaker === 'user'
-        ? 'あなた'
+      latestRole && hasSpeakerMapping
+        ? latestRole === 'interviewer'
+          ? '面接官'
+          : 'あなた'
+        : latestRole
+        ? '判定中'
         : '';
 
     return {
@@ -198,20 +204,65 @@ export default function CompactWindow() {
     []
   );
 
-  const handleOpacityChange = useCallback((value: number) => {
-    setOpacity(value);
-    localStorage.setItem(OPACITY_STORAGE_KEY, value.toString());
-  }, []);
-
   const handleClose = useCallback(() => {
     sendCommand('close-compact');
   }, [sendCommand]);
 
+  const ensureMicrophonePermission = useCallback(async () => {
+    if (micPrimedRef.current) {
+      return true;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicError('マイクアクセスがサポートされていません');
+      return false;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false
+        }
+      });
+      stream.getTracks().forEach(track => track.stop());
+      micPrimedRef.current = true;
+      return true;
+    } catch (error) {
+      console.error('❌ マイクアクセスに失敗しました:', error);
+      let message = 'マイクアクセスに失敗しました';
+      if (error instanceof DOMException) {
+        if (error.name === 'NotAllowedError') {
+          message = 'マイクアクセスが拒否されました。設定で許可してください。';
+        } else if (error.name === 'NotFoundError') {
+          message = 'マイクデバイスが見つかりません。';
+        }
+      }
+      setMicError(message);
+      return false;
+    }
+  }, []);
+
+  const handleStartClick = useCallback(async () => {
+    setMicError(null);
+    const granted = await ensureMicrophonePermission();
+    if (!granted) {
+      return;
+    }
+    sendCommand('start-recording');
+  }, [ensureMicrophonePermission, sendCommand]);
+
+  useEffect(() => {
+    if (state?.isRecording) {
+      setMicError(null);
+    }
+  }, [state?.isRecording]);
+
   return (
-    <div className="w-full h-full bg-transparent px-3 py-4">
+    <div className="w-full h-full bg-transparent px-4 py-5">
       <div
         className={`h-full flex flex-col border ${themeClasses.cardBorder} ${themeClasses.cardBg} ${themeClasses.cardShadow} ${themeClasses.text} rounded-3xl backdrop-blur-xl overflow-hidden`}
-        style={{ opacity }}
       >
         <header
           className={`px-5 py-4 flex items-center justify-between gap-4 ${themeClasses.dragBg}`}
@@ -236,62 +287,7 @@ export default function CompactWindow() {
           </button>
         </header>
 
-        <div
-          className={`px-5 py-3 flex items-center gap-3 border-y ${themeClasses.dividerBorder} ${themeClasses.sectionBg}`}
-          data-tauri-drag-region={false}
-        >
-          <Droplet className={`w-4 h-4 ${themeClasses.textMuted}`} />
-          <input
-            type="range"
-            min={0.4}
-            max={1}
-            step={0.05}
-            value={opacity}
-            onChange={event => handleOpacityChange(Number(event.target.value))}
-            className={`flex-1 ${themeClasses.sliderAccent}`}
-            aria-label="ウィンドウの透明度"
-          />
-          <span className={`text-xs min-w-[44px] text-right ${themeClasses.textMuted}`}>
-            {Math.round(opacity * 100)}%
-          </span>
-        </div>
-
-        <main className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          <section
-            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
-          >
-            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
-              現在の話者
-            </p>
-            <div className="flex items-center gap-2">
-              <span
-                className={`inline-flex w-2.5 h-2.5 rounded-full ${activeSpeaker.indicatorClass}`}
-              />
-              <span className="text-sm font-semibold">{activeSpeaker.label}</span>
-            </div>
-            <p className={`text-xs ${themeClasses.textMuted}`}>{activeSpeaker.detail}</p>
-            {activeSpeaker.latestLabel && activeSpeaker.latestTimestamp && (
-              <p className={`text-xs ${themeClasses.textMuted}`}>
-                最新: {activeSpeaker.latestLabel}・{activeSpeaker.latestTimestamp}
-              </p>
-            )}
-          </section>
-
-          <section
-            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
-          >
-            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
-              最新の転写
-            </p>
-            <div
-              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2 min-h-[112px]`}
-            >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                {activeSpeaker.transcriptText}
-              </p>
-            </div>
-          </section>
-
+        <main className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
           <section
             className={`rounded-2xl border ${themeClasses.accentBorder} ${themeClasses.accentBg} p-4 space-y-3`}
           >
@@ -312,17 +308,52 @@ export default function CompactWindow() {
               )}
             </div>
             <div
-              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionBg} px-3 py-2 min-h-[140px]`}
+              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionBg} px-3 py-3 min-h-[200px]`}
             >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap">{aiInfo.text}</p>
+              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{aiInfo.text}</p>
               {aiInfo.timestamp && (
-                <p className={`text-xs mt-2 text-right ${themeClasses.textMuted}`}>
-                  {aiInfo.timestamp}
-                </p>
+                <p className={`text-xs mt-3 text-right ${themeClasses.textMuted}`}>{aiInfo.timestamp}</p>
               )}
             </div>
             {aiInfo.question && (
               <p className={`text-xs ${themeClasses.textMuted}`}>Q: {aiInfo.question}</p>
+            )}
+          </section>
+
+          <section
+            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
+          >
+            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
+              最新の転写
+            </p>
+            <div
+              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2 min-h-[120px]`}
+            >
+              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                {activeSpeaker.transcriptText}
+              </p>
+            </div>
+          </section>
+
+          <section
+            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
+          >
+            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
+              現在の話者
+            </p>
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex w-2.5 h-2.5 rounded-full ${activeSpeaker.indicatorClass}`}
+              />
+              <div className="flex flex-col">
+                <span className="text-sm font-semibold">{activeSpeaker.label}</span>
+                <span className={`text-xs ${themeClasses.textMuted}`}>{activeSpeaker.detail}</span>
+              </div>
+            </div>
+            {activeSpeaker.latestLabel && activeSpeaker.latestTimestamp && (
+              <p className={`text-xs ${themeClasses.textMuted}`}>
+                最新: {activeSpeaker.latestLabel}・{activeSpeaker.latestTimestamp}
+              </p>
             )}
           </section>
         </main>
@@ -353,9 +384,7 @@ export default function CompactWindow() {
             {state?.isRecording ? (
               <>
                 <button
-                  onClick={() =>
-                    sendCommand(state.isPaused ? 'resume-recording' : 'pause-recording')
-                  }
+                  onClick={() => sendCommand(state.isPaused ? 'resume-recording' : 'pause-recording')}
                   className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                     state.isPaused
                       ? 'bg-blue-600 text-white hover:bg-blue-700'
@@ -375,7 +404,7 @@ export default function CompactWindow() {
               </>
             ) : (
               <button
-                onClick={() => sendCommand('start-recording')}
+                onClick={handleStartClick}
                 className="px-4 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
                 data-tauri-drag-region={false}
               >
@@ -384,6 +413,11 @@ export default function CompactWindow() {
             )}
           </div>
         </footer>
+        {micError && (
+          <div className="px-6 pb-4">
+            <p className="text-xs text-red-400">{micError}</p>
+          </div>
+        )}
       </div>
     </div>
   );
