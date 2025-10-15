@@ -11,12 +11,18 @@ export interface AudioCaptureConfig {
   autoGainControl: boolean;
 }
 
+interface WorkletChunkMessage {
+  audio: Float32Array;
+  rms: number;
+  peak: number;
+}
+
 export class AudioCaptureService {
   private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
-  private scriptProcessor: ScriptProcessorNode | null = null;
+  private silentSink: GainNode | null = null;
   private isPaused = false;
   
   public onAudioData?: (audioData: Float32Array) => void;
@@ -88,64 +94,70 @@ export class AudioCaptureService {
       // ソースノードを作成
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
       
-      // ScriptProcessorNodeを使用（より安定）
-      // バッファサイズを小さくしてレイテンシーを改善
-      const bufferSize = 2048; // 4096から2048に変更
-      this.scriptProcessor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
-      
-      let lastProcessTime = Date.now();
-      let processCount = 0;
+      if (!this.audioContext.audioWorklet) {
+        throw new Error('AudioWorkletがサポートされていません');
+      }
+
+      await this.audioContext.audioWorklet.addModule(
+        new URL('../worklets/audio-capture.worklet.ts', import.meta.url)
+      );
+
+      this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-capture-processor', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        channelInterpretation: 'speakers'
+      });
+
+      let lastLogTime = Date.now();
+      let chunkCount = 0;
       let totalSamples = 0;
-      
-      this.scriptProcessor.onaudioprocess = (event) => {
-        try {
-          const inputData = event.inputBuffer.getChannelData(0);
-          
-          // 音声レベルをチェック（デバッグ用）
-          let sum = 0;
-          let maxAmp = 0;
-          for (let i = 0; i < inputData.length; i++) {
-            sum += inputData[i] * inputData[i];
-            maxAmp = Math.max(maxAmp, Math.abs(inputData[i]));
-          }
-          const rms = Math.sqrt(sum / inputData.length);
-          
-          // コピーを作成（参照が変更される可能性があるため）
-          const audioCopy = new Float32Array(inputData);
-          
-          // コールバックを呼び出し
-          if (this.onAudioData && !this.isPaused) {
-            this.onAudioData(audioCopy);
-          }
-          
-          processCount++;
-          totalSamples += inputData.length;
-          const now = Date.now();
-          if (now - lastProcessTime >= 5000) {
-            const elapsed = (now - lastProcessTime) / 1000;
-            console.log(`🎵 音声処理: ${processCount}チャンク / ${elapsed.toFixed(1)}秒, RMS: ${rms.toFixed(6)}, Max: ${maxAmp.toFixed(6)}, サンプル合計: ${totalSamples}`);
-            processCount = 0;
-            totalSamples = 0;
-            lastProcessTime = now;
-          }
-        } catch (error) {
-          console.error('❌ 音声処理エラー:', error);
-          this.onError?.(error instanceof Error ? error.message : '音声処理エラー');
+      let lastRms = 0;
+      let lastPeak = 0;
+
+      this.workletNode.port.onmessage = (event: MessageEvent<WorkletChunkMessage>) => {
+        const payload = event.data;
+        if (!payload?.audio || !(payload.audio instanceof Float32Array)) {
+          return;
+        }
+
+        if (this.onAudioData && !this.isPaused) {
+          this.onAudioData(payload.audio);
+        }
+
+        chunkCount += 1;
+        totalSamples += payload.audio.length;
+        lastRms = payload.rms;
+        lastPeak = payload.peak;
+
+        const now = Date.now();
+        if (now - lastLogTime >= 5000) {
+          const elapsed = (now - lastLogTime) / 1000;
+          console.log(
+            `🎵 AudioWorklet: ${(chunkCount / elapsed).toFixed(1)}チャンク/秒, RMS: ${lastRms.toFixed(6)}, Max: ${lastPeak.toFixed(6)}, サンプル合計: ${totalSamples}`
+          );
+          chunkCount = 0;
+          totalSamples = 0;
+          lastLogTime = now;
         }
       };
-      
-      // 接続（重要: destinationに接続しない）
-      // ScriptProcessorNodeはsourceに接続するだけで動作します
-      // destinationに接続するとフィードバックや不要な音声出力が発生する可能性があります
-      this.sourceNode.connect(this.scriptProcessor);
-      // this.scriptProcessor.connect(this.audioContext.destination); // ← この行を削除
-      
-      // ダミーノードに接続してGCを防ぐ
-      // ScriptProcessorNodeはどこかに接続されていないとGCされる可能性があるため
-      const dummyGain = this.audioContext.createGain();
-      dummyGain.gain.value = 0; // 音量を0に設定
-      this.scriptProcessor.connect(dummyGain);
-      dummyGain.connect(this.audioContext.destination);
+
+      this.workletNode.port.onmessageerror = (event) => {
+        console.warn('⚠️ AudioWorklet message error:', event);
+      };
+
+      this.workletNode.onprocessorerror = (event) => {
+        console.error('❌ AudioWorklet処理エラー:', event);
+        this.onError?.('AudioWorklet処理エラー');
+      };
+
+      this.sourceNode.connect(this.workletNode);
+
+      this.silentSink = this.audioContext.createGain();
+      this.silentSink.gain.value = 0;
+      this.workletNode.connect(this.silentSink);
+      this.silentSink.connect(this.audioContext.destination);
       
       this.isPaused = false;
       console.log('✅ 音声キャプチャ開始完了');
@@ -224,17 +236,19 @@ export class AudioCaptureService {
    * リソースをクリーンアップ
    */
   private cleanup(): void {
-    // ScriptProcessorを切断
-    if (this.scriptProcessor) {
-      this.scriptProcessor.disconnect();
-      this.scriptProcessor.onaudioprocess = null;
-      this.scriptProcessor = null;
-    }
-    
     // AudioWorkletを切断
     if (this.workletNode) {
+      this.workletNode.port.onmessage = null;
+      this.workletNode.port.onmessageerror = null;
+      this.workletNode.onprocessorerror = null;
+      this.workletNode.port.close();
       this.workletNode.disconnect();
       this.workletNode = null;
+    }
+
+    if (this.silentSink) {
+      this.silentSink.disconnect();
+      this.silentSink = null;
     }
     
     // ソースノードを切断
