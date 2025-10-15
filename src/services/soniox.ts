@@ -48,6 +48,10 @@ export class SonioxSTTService {
   private ws: WebSocket | null = null;
   private config: SonioxConfig | null = null;
   private responseCount: number = 0; // デバッグ用カウンター
+  private keepaliveTimer: number | null = null;
+  private lastAudioSentAt = Date.now();
+  private readonly KEEPALIVE_INTERVAL_MS = 8_000;
+  private readonly KEEPALIVE_THRESHOLD_MS = 6_000;
   
   // 現在の発話追跡（speaker別）
   private currentSpeaker: string | null = null;
@@ -71,6 +75,8 @@ export class SonioxSTTService {
         this.ws.onopen = () => {
           console.log('✅ Soniox WebSocket接続成功');
           this.sendConfiguration();
+          this.lastAudioSentAt = Date.now();
+          this.startKeepalive();
           this.onConnected?.();
           resolve();
         };
@@ -149,6 +155,8 @@ export class SonioxSTTService {
       return;
     }
     
+    this.lastAudioSentAt = Date.now();
+    
     // Float32ArrayをInt16Arrayに変換
     const int16Array = new Int16Array(audioData.length);
     for (let i = 0; i < audioData.length; i++) {
@@ -168,6 +176,7 @@ export class SonioxSTTService {
     console.log('📤 Soniox: 空フレームを送信してストリームを終了');
     // 空のフレームを送信
     this.ws.send(new ArrayBuffer(0));
+    this.lastAudioSentAt = Date.now();
   }
   
   private handleResponse(response: SonioxResponse): void {
@@ -302,6 +311,7 @@ export class SonioxSTTService {
       this.ws.close();
       this.ws = null;
     }
+    this.stopKeepalive();
     // 状態をクリア
     this.currentSpeaker = null;
     this.currentFinalTokens = [];
@@ -312,7 +322,44 @@ export class SonioxSTTService {
   isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
+
+  public sendKeepalive(reason: 'auto' | 'pause' | 'resume' | 'manual' = 'auto'): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      this.ws.send(JSON.stringify({ type: 'keepalive' }));
+      this.lastAudioSentAt = Date.now();
+      console.log(
+        `📡 Soniox keepalive送信 (${reason})`
+      );
+    } catch (error) {
+      console.error('❌ keepalive送信に失敗しました:', error);
+    }
+  }
+
+  private startKeepalive(): void {
+    this.stopKeepalive();
+    if (typeof window === 'undefined') {
+      return;
+    }
+    this.keepaliveTimer = window.setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const now = Date.now();
+      if (now - this.lastAudioSentAt >= this.KEEPALIVE_THRESHOLD_MS) {
+        this.sendKeepalive();
+      }
+    }, this.KEEPALIVE_INTERVAL_MS);
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer !== null && typeof window !== 'undefined') {
+      window.clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+  }
 }
 
 export const sonioxService = new SonioxSTTService();
-

@@ -3,6 +3,8 @@
  * Supports OpenAI and OpenRouter
  */
 
+import { httpRequest } from './http-client';
+
 export type LLMProvider = 'openai' | 'openrouter';
 
 export interface LLMConfig {
@@ -42,18 +44,20 @@ export class LLMService {
     });
     
     try {
-      const response = await fetch(endpoint, {
+      const response = await httpRequest(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body
       });
       
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error?.message || `HTTP ${response.status}`);
+        const error =
+          (response.body as any)?.error?.message ||
+          `HTTP ${response.status}`;
+        throw new Error(error);
       }
       
-      const data = await response.json();
+      const data = response.body as any;
       const content = data.choices?.[0]?.message?.content;
       
       if (!content) {
@@ -116,13 +120,13 @@ export class LLMService {
         headers['X-Title'] = 'AI Interview Assistant';
       }
       
-      const response = await fetch(endpoint, { headers });
+      const response = await httpRequest(endpoint, { headers });
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
       
-      const data = await response.json();
+      const data = response.body as any;
       
       if (this.config.provider === 'openai') {
         // OpenAI: GPT-4とGPT-5モデルのみフィルタ
@@ -193,4 +197,3 @@ export class LLMService {
 }
 
 export const llmService = new LLMService();
-

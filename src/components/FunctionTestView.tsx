@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { X, PlayCircle, StopCircle, Mic, MessageSquare, Brain, CheckCircle, AlertCircle } from 'lucide-react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { X, PlayCircle, StopCircle, Mic, MessageSquare, Brain, CheckCircle, AlertCircle, RefreshCw, Edit3, Save, XCircle } from 'lucide-react';
 import type { Settings as SettingsType } from '../types';
 import { sonioxService } from '../services/soniox';
 import { llmService, type LLMMessage } from '../services/llm';
@@ -37,6 +37,9 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
   const [error, setError] = useState<string>('');
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [debugInfo, setDebugInfo] = useState<string>('');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editedText, setEditedText] = useState('');
   
   // 最後の面接官の質問を追跡
   const lastInterviewerQuestionRef = useRef<string>('');
@@ -49,23 +52,185 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
   const hasIdentifiedRef = useRef<boolean>(false); // 識別済みフラグ
   const startTimeRef = useRef<number>(Date.now());
   const identificationTranscriptsRef = useRef<Array<{ speaker: string; text: string }>>([]);
+  const activeTranscriptMapRef = useRef<Record<string, string>>({});
+  const lastFinalTranscriptRef = useRef<Record<string, { timestamp: number; messageId: string }>>({});
+  const keywords = useMemo(() => {
+    const STOPWORDS = new Set([
+      'です',
+      'ます',
+      'こと',
+      'ため',
+      'ので',
+      'よう',
+      'この',
+      'その',
+      'そして',
+      'また',
+      'など',
+      'これ',
+      'それ',
+      'もの',
+      'ように',
+      '経験',
+      '担当',
+      '業務',
+      '対応',
+      '使用',
+      '実施',
+      '個人',
+      '会社',
+      '企業'
+    ]);
+
+    const corpus = [
+      ...transcripts.map(item => item.text),
+      ...llmResponses.map(item => item.answer)
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const frequency = new Map<string, number>();
+    corpus
+      .split(/[\s、，,。．！？?!〜…・\/\\()（）「」『』【】\[\]{}:：;；\-]+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 2 && token.length <= 20)
+      .filter(token => !STOPWORDS.has(token))
+      .forEach(token => {
+        const count = frequency.get(token) || 0;
+        frequency.set(token, count + 1);
+      });
+
+    return Array.from(frequency.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([token]) => token);
+  }, [transcripts, llmResponses]);
+
+  const { keywordRegex, keywordLookup } = useMemo(() => {
+    const lookup = new Map<string, string>();
+    const tokens = keywords
+      .map(token => token.trim())
+      .filter(token => token.length > 0);
+
+    tokens.forEach(token => {
+      lookup.set(token.toLowerCase(), token);
+    });
+
+    if (tokens.length === 0) {
+      return { keywordRegex: null as RegExp | null, keywordLookup: lookup };
+    }
+
+    const escaped = Array.from(new Set(tokens))
+      .sort((a, b) => b.length - a.length)
+      .map(token => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+
+    return {
+      keywordRegex: escaped ? new RegExp(`(${escaped})`, 'gi') : null,
+      keywordLookup: lookup
+    };
+  }, [keywords]);
+
+  const renderHighlightedAnswer = useCallback(
+    (text: string) => {
+      if (!keywordRegex) {
+        return text;
+      }
+      return text.split(keywordRegex).map((part, index) => {
+        const normalized = part.toLowerCase();
+        if (keywordLookup.has(normalized)) {
+          return (
+            <mark
+              key={`${part}-${index}`}
+              className="bg-yellow-200 text-gray-900 px-1 py-0.5 rounded"
+            >
+              {part}
+            </mark>
+          );
+        }
+        return <span key={`${part}-${index}`}>{part}</span>;
+      });
+    },
+    [keywordRegex, keywordLookup]
+  );
+
+  const diarizationSpeakers = useMemo(() => {
+    const speakerSet = new Set<string>();
+    transcripts.forEach(item => {
+      if (item.originalSpeaker) {
+        speakerSet.add(item.originalSpeaker);
+      }
+    });
+    if (!speakerSet.has('spk1')) {
+      speakerSet.add('spk1');
+    }
+    if (!speakerSet.has('spk2')) {
+      speakerSet.add('spk2');
+    }
+    return Array.from(speakerSet);
+  }, [transcripts]);
+
+  const formatSpeakerOptionLabel = useCallback(
+    (value: string) => {
+      if (!value) return 'Speaker';
+      const base = value.startsWith('spk') ? `Speaker ${value.replace('spk', '')}` : value;
+      if (!interviewerSpeaker) {
+        return base;
+      }
+      return value === interviewerSpeaker ? `面接官 (${base})` : `あなた (${base})`;
+    },
+    [interviewerSpeaker]
+  );
+
+  useEffect(() => {
+    if (!isIdentifying) {
+      setElapsedSeconds(60);
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      const elapsed = Math.min(
+        60,
+        Math.max(0, Math.floor((Date.now() - startTimeRef.current) / 1000))
+      );
+      setElapsedSeconds(elapsed);
+    }, 500);
+
+    return () => window.clearInterval(interval);
+  }, [isIdentifying]);
+
+  const updateTranscriptRoles = useCallback((identifiedSpeaker: 'spk1' | 'spk2') => {
+    setTranscripts(prev =>
+      prev.map(item => ({
+        ...item,
+        speaker: item.originalSpeaker === identifiedSpeaker ? 'interviewer' : 'user'
+      }))
+    );
+  }, []);
 
   // LLMで面接官を識別
   const identifyInterviewer = async () => {
+    const transcriptCount = identificationTranscriptsRef.current.length;
+
     // 既に識別済みの場合はスキップ
     if (hasIdentifiedRef.current) {
-      console.log('✅ 既に識別済みのためスキップ');
+      console.log('✅ 既に識別済みのためスキップ', { transcriptCount });
       return;
     }
     
-    hasIdentifiedRef.current = true; // 識別開始をマーク
-    
-    if (identificationTranscriptsRef.current.length === 0) {
-      console.warn('⚠️ 識別用の転写データがありません');
+    if (transcriptCount === 0) {
+      console.warn('⚠️ 識別用の転写データがありません', { transcriptCount });
       return;
     }
 
-    console.log('🔍 LLMで面接官を識別中...', identificationTranscriptsRef.current.length, '件の転写');
+    hasIdentifiedRef.current = true; // 識別開始をマーク
+
+    const transcriptPreview = identificationTranscriptsRef.current
+      .slice(-3)
+      .map(item => `${item.speaker}: ${item.text.slice(0, 60)}${item.text.length > 60 ? '…' : ''}`);
+
+    console.log('🔍 LLMで面接官を識別中...', transcriptCount, '件の転写');
+    console.log('🗒️ 識別対象の最新サンプル:', transcriptPreview);
     setStatus('面接官を識別中...');
 
     try {
@@ -73,6 +238,7 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
       const conversationText = identificationTranscriptsRef.current
         .map(t => `${t.speaker}: ${t.text}`)
         .join('\n');
+      console.log('🧾 conversationText長さ:', conversationText.length);
 
       const prompt = `以下は会話の転写です。2人の話者がいます。どちらが面接官（質問する側）で、どちらが候補者（回答する側）か判断してください。
 
@@ -97,6 +263,7 @@ ${conversationText}
       const cleanAnswer = answer.trim().toLowerCase();
 
       console.log('🤖 LLM識別結果:', answer);
+      console.log('🧮 LLM識別結果(clean):', cleanAnswer);
 
       let identifiedSpeaker: 'spk1' | 'spk2';
       
@@ -120,34 +287,12 @@ ${conversationText}
       
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
+      setElapsedSeconds(60);
       setDebugInfo('面接官識別完了');
       
       console.log(`🔄 転写項目を更新中... 面接官: ${identifiedSpeaker}`);
       
-      // 既存の転写項目のspeakerフィールドを更新
-      setTranscripts(prev => {
-        console.log(`🔍 更新前の転写項目数: ${prev.length}`);
-        prev.forEach((item, i) => {
-          console.log(`  [${i}] originalSpeaker: "${item.originalSpeaker}", speaker: "${item.speaker}", text: "${item.text.substring(0, 20)}..."`);
-        });
-        
-        const updated = prev.map(item => {
-          const isMatch = item.originalSpeaker === identifiedSpeaker;
-          const newSpeaker: 'user' | 'interviewer' = isMatch ? 'interviewer' : 'user';
-          console.log(`  📝 "${item.originalSpeaker}" === "${identifiedSpeaker}"? ${isMatch} → ${newSpeaker}`);
-          return {
-            ...item,
-            speaker: newSpeaker
-          };
-        });
-        
-        console.log(`✅ ${updated.length}件の転写項目を更新完了`);
-        updated.forEach((item, i) => {
-          console.log(`  [${i}] 更新後 speaker: "${item.speaker}"`);
-        });
-        
-        return updated;
-      });
+      updateTranscriptRoles(identifiedSpeaker);
       
     } catch (err) {
       console.error('❌ 面接官識別エラー:', err);
@@ -158,37 +303,183 @@ ${conversationText}
       setInterviewerSpeaker(identifiedSpeaker);
       setIsIdentifying(false);
       isIdentifyingRef.current = false;
+      setElapsedSeconds(60);
       setStatus('面接官識別完了: spk1 (エラー時デフォルト)');
       setDebugInfo('識別エラー、デフォルト設定適用');
       
       console.log(`🔄 転写項目を更新中... 面接官: ${identifiedSpeaker} (エラー時)`);
       
-      // 既存の転写項目のspeakerフィールドを更新
-      setTranscripts(prev => {
-        console.log(`🔍 更新前の転写項目数: ${prev.length}`);
-        prev.forEach((item, i) => {
-          console.log(`  [${i}] originalSpeaker: "${item.originalSpeaker}", speaker: "${item.speaker}", text: "${item.text.substring(0, 20)}..."`);
-        });
-        
-        const updated = prev.map(item => {
-          const isMatch = item.originalSpeaker === identifiedSpeaker;
-          const newSpeaker: 'user' | 'interviewer' = isMatch ? 'interviewer' : 'user';
-          console.log(`  📝 "${item.originalSpeaker}" === "${identifiedSpeaker}"? ${isMatch} → ${newSpeaker}`);
-          return {
-            ...item,
-            speaker: newSpeaker
-          };
-        });
-        
-        console.log(`✅ ${updated.length}件の転写項目を更新完了`);
-        updated.forEach((item, i) => {
-          console.log(`  [${i}] 更新後 speaker: "${item.speaker}"`);
-        });
-        
-        return updated;
-      });
+      updateTranscriptRoles(identifiedSpeaker);
     }
   };
+
+  const manuallySetInterviewer = (speaker: 'spk1' | 'spk2') => {
+    interviewerSpeakerRef.current = speaker;
+    setInterviewerSpeaker(speaker);
+    setIsIdentifying(false);
+    isIdentifyingRef.current = false;
+    hasIdentifiedRef.current = true;
+    setElapsedSeconds(60);
+    setStatus(`面接官識別完了: ${speaker === 'spk1' ? 'Speaker 1' : 'Speaker 2'} (手動設定)`);
+    setDebugInfo('手動で面接官を設定しました');
+    updateTranscriptRoles(speaker);
+  };
+
+  const handleReidentify = () => {
+    const transcriptsForIdentification = transcripts
+      .filter(item => item.originalSpeaker && item.isFinal)
+      .map(item => ({
+        speaker: item.originalSpeaker,
+        text: item.text
+      }));
+
+    if (transcriptsForIdentification.length < 3) {
+      setDebugInfo('再識別には最低3件の確定転写が必要です');
+      return;
+    }
+
+    identificationTranscriptsRef.current = transcriptsForIdentification;
+    hasIdentifiedRef.current = false;
+    setInterviewerSpeaker(null);
+    interviewerSpeakerRef.current = null;
+    setIsIdentifying(true);
+    isIdentifyingRef.current = true;
+    setElapsedSeconds(0);
+    setStatus('面接官を再識別中...');
+    setDebugInfo('再識別を実行しています');
+    identifyInterviewer();
+  };
+
+  const beginEditTranscript = (item: TranscriptItem) => {
+    setEditingMessageId(item.id);
+    setEditedText(item.text);
+  };
+
+  const cancelEditTranscript = () => {
+    setEditingMessageId(null);
+    setEditedText('');
+  };
+
+  const saveEditTranscript = () => {
+    if (!editingMessageId) return;
+
+    setTranscripts(prev => {
+      const updated = prev.map(item =>
+        item.id === editingMessageId ? { ...item, text: editedText } : item
+      );
+
+      if (isIdentifyingRef.current) {
+        identificationTranscriptsRef.current = updated
+          .filter(item => item.originalSpeaker)
+          .map(item => ({
+            speaker: item.originalSpeaker,
+            text: item.text
+          }));
+      }
+
+      return updated;
+    });
+
+    setEditingMessageId(null);
+    setEditedText('');
+  };
+
+  const handleChangeTranscriptSpeaker = (transcriptId: string, newOriginalSpeaker: string) => {
+    if (!newOriginalSpeaker) {
+      return;
+    }
+
+    let shouldTriggerLLM = false;
+    let pendingQuestion = '';
+
+    setTranscripts(prev => {
+      const target = prev.find(item => item.id === transcriptId);
+      if (!target) {
+        return prev;
+      }
+
+      if (target.originalSpeaker === newOriginalSpeaker) {
+        return prev;
+      }
+
+      const resolvedRole: 'interviewer' | 'user' =
+        interviewerSpeakerRef.current != null
+          ? interviewerSpeakerRef.current === newOriginalSpeaker
+            ? 'interviewer'
+            : 'user'
+          : newOriginalSpeaker === 'spk1'
+          ? 'interviewer'
+          : 'user';
+
+      const updated = prev.map(item =>
+        item.id === transcriptId
+          ? {
+              ...item,
+              originalSpeaker: newOriginalSpeaker,
+              speaker: resolvedRole
+            }
+          : item
+      );
+
+      identificationTranscriptsRef.current = updated
+        .filter(item => item.originalSpeaker)
+        .map(item => ({
+          speaker: item.originalSpeaker,
+          text: item.text
+        }));
+
+      if (
+        target.originalSpeaker &&
+        activeTranscriptMapRef.current[target.originalSpeaker] === target.id
+      ) {
+        delete activeTranscriptMapRef.current[target.originalSpeaker];
+      }
+
+      if (
+        target.originalSpeaker &&
+        lastFinalTranscriptRef.current[target.originalSpeaker]?.messageId === target.id
+      ) {
+        delete lastFinalTranscriptRef.current[target.originalSpeaker];
+      }
+
+      if (target.isFinal) {
+        lastFinalTranscriptRef.current[newOriginalSpeaker] = {
+          timestamp: Date.now(),
+          messageId: target.id
+        };
+      } else {
+        activeTranscriptMapRef.current[newOriginalSpeaker] = target.id;
+      }
+
+      const interviewerId = interviewerSpeakerRef.current;
+      if (
+        target.isFinal &&
+        interviewerId &&
+        interviewerId === newOriginalSpeaker &&
+        target.text.trim().length > 0 &&
+        !llmResponses.some(response => response.question === target.text)
+      ) {
+        shouldTriggerLLM = true;
+        pendingQuestion = target.text;
+      }
+
+      if (target.isFinal && interviewerId && interviewerId === newOriginalSpeaker) {
+        lastInterviewerQuestionRef.current = target.text;
+      }
+
+      return updated;
+    });
+
+    if (shouldTriggerLLM) {
+      void handleLLMResponse(pendingQuestion);
+    }
+  };
+
+  const handleRegenerateResponse = (response: LLMResponseItem) => {
+    void handleLLMResponse(response.question, response.id);
+  };
+
+  const remainingSeconds = Math.max(0, 60 - Math.floor(elapsedSeconds));
 
   const handleStartTest = async () => {
     try {
@@ -204,8 +495,13 @@ ${conversationText}
       hasIdentifiedRef.current = false; // 識別フラグをリセット
       startTimeRef.current = Date.now();
       identificationTranscriptsRef.current = [];
+      setElapsedSeconds(0);
       setTranscripts([]);
       setLLMResponses([]);
+      setEditingMessageId(null);
+      setEditedText('');
+      activeTranscriptMapRef.current = {};
+      lastFinalTranscriptRef.current = {};
       
       console.log('🎬 機能テスト開始...');
 
@@ -220,100 +516,130 @@ ${conversationText}
 
       // Soniox STTコールバックを設定
       sonioxService.onTranscript = (text: string, isFinal: boolean, speaker?: string) => {
-        console.log(`📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSpeakerRef.current}]:`, text.substring(0, 50));
-        
-        if (!speaker || !text.trim()) {
-          console.warn('⚠️ speaker または text が空です', { speaker, text: text.trim() });
+        const trimmedText = text.trim();
+        console.log(`📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSpeakerRef.current}]:`, trimmedText.substring(0, 50));
+
+        if (!speaker) {
+          console.warn('⚠️ speaker が空です');
           return;
         }
-        
-        // 面接官識別期間中（最初の1分間）はデータを収集
+
+        if (!trimmedText && isFinal) {
+          delete activeTranscriptMapRef.current[speaker];
+          delete lastFinalTranscriptRef.current[speaker];
+          return;
+        }
+
+        if (!trimmedText) {
+          return;
+        }
+
         if (isIdentifyingRef.current) {
-          const elapsedTime = (Date.now() - startTimeRef.current) / 1000; // 秒
-          
+          const elapsedTime = (Date.now() - startTimeRef.current) / 1000;
+
           if (isFinal) {
-            // 最終結果のみを収集
-            identificationTranscriptsRef.current.push({
-              speaker: speaker,
-              text: text.trim()
-            });
-            
-            console.log(`🔍 識別データ収集中: ${elapsedTime.toFixed(1)}秒経過, ${identificationTranscriptsRef.current.length}件`);
+            const transcripts = identificationTranscriptsRef.current;
+            const lastEntry = transcripts[transcripts.length - 1];
+            if (lastEntry && lastEntry.speaker === speaker) {
+              transcripts[transcripts.length - 1] = { speaker, text: trimmedText };
+            } else {
+              transcripts.push({ speaker, text: trimmedText });
+            }
+
+            console.log(`🔍 識別データ収集中: ${elapsedTime.toFixed(1)}秒経過, ${transcripts.length}件`);
             setDebugInfo(`識別データ収集中: ${elapsedTime.toFixed(0)}秒/${60}秒`);
           }
-          
-          // 1分経過したら面接官を識別
+
           if (elapsedTime >= 60 && identificationTranscriptsRef.current.length >= 3) {
             console.log('⏰ 1分経過、面接官を識別します');
             identifyInterviewer();
           }
         }
-        
-        // 話者の役割を決定
+
         let speakerRole: 'user' | 'interviewer';
-        
+
         if (interviewerSpeakerRef.current) {
-          // 識別完了後
           const isMatch = speaker === interviewerSpeakerRef.current;
           speakerRole = isMatch ? 'interviewer' : 'user';
           console.log(`👤 話者判定 [識別済み]: "${speaker}" === "${interviewerSpeakerRef.current}"? ${isMatch} → role=${speakerRole}`);
         } else {
-          // 識別中は暫定的に表示（まだLLM処理はしない）
           speakerRole = speaker === 'spk1' ? 'interviewer' : 'user';
           console.log(`👤 話者判定 [識別中]: speaker=${speaker}, 暫定role=${speakerRole}`);
         }
-        
-        // トランスクリプトを追加
-        const transcript: TranscriptItem = {
-          id: Date.now().toString() + Math.random(),
-          text: text.trim(),
-          timestamp: new Date().toLocaleTimeString('ja-JP'),
-          speaker: speakerRole,
-          originalSpeaker: speaker, // 元の話者情報を保存
-          isFinal
-        };
-        
-        console.log(`📋 転写項目作成: originalSpeaker="${speaker}", speaker="${speakerRole}", isFinal=${isFinal}`);
-        
-        setTranscripts(prev => {
-          const lastIndex = prev.length - 1;
-          
-          // 最後のエントリと同じspeakerかチェック
-          if (lastIndex >= 0 && prev[lastIndex].originalSpeaker === speaker) {
-            const lastEntry = prev[lastIndex];
-            
-            // 前のエントリがfinalの場合
-            if (lastEntry.isFinal) {
-              // 新しいutteranceとして追加
-              console.log(`  + 新しいutterance [${prev.length}], speaker=${speaker}, isFinal=${isFinal}`);
-              return [...prev, transcript];
-            } else {
-              // 前のエントリがnon-finalの場合は更新
-              console.log(`  ↻ utteranceを更新 [${lastIndex}], isFinal=${isFinal}`);
-              const updated = [...prev];
-              updated[lastIndex] = transcript;
-              return updated;
-            }
+
+        if (!isFinal && lastFinalTranscriptRef.current[speaker]) {
+          delete activeTranscriptMapRef.current[speaker];
+          delete lastFinalTranscriptRef.current[speaker];
+        }
+
+        let resolvedTranscriptId: string | undefined = activeTranscriptMapRef.current[speaker];
+
+        if (resolvedTranscriptId && isFinal) {
+          const finalInfo = lastFinalTranscriptRef.current[speaker];
+          if (finalInfo && finalInfo.messageId === resolvedTranscriptId && Date.now() - finalInfo.timestamp > 2000) {
+            resolvedTranscriptId = undefined;
+            delete activeTranscriptMapRef.current[speaker];
           }
-          
-          // 異なるspeakerまたは最初のエントリ → 新規追加
-          console.log(`  + 新しい転写エントリ [${prev.length}], speaker=${speaker}, isFinal=${isFinal}`);
-          return [...prev, transcript];
-        });
-        
-        // 識別完了後、最終結果で面接官の発言の場合のみLLM処理
-        const shouldCheckLLM = !isIdentifyingRef.current && isFinal && text.trim();
-        console.log(`🔍 LLM処理条件チェック: isIdentifying=${isIdentifyingRef.current}, isFinal=${isFinal}, hasText=${!!text.trim()}, shouldCheck=${shouldCheckLLM}`);
-        
+        }
+
+        if (!resolvedTranscriptId && isFinal) {
+          const info = lastFinalTranscriptRef.current[speaker];
+          if (info && Date.now() - info.timestamp <= 2000) {
+            resolvedTranscriptId = info.messageId;
+          }
+        }
+
+        if (resolvedTranscriptId) {
+          const targetId = resolvedTranscriptId;
+          setTranscripts(prev =>
+            prev.map(item =>
+              item.id === targetId
+                ? {
+                    ...item,
+                    text: trimmedText,
+                    isFinal
+                  }
+                : item
+            )
+          );
+        } else {
+          const transcript: TranscriptItem = {
+            id: `${Date.now()}-${Math.random()}`,
+            text: trimmedText,
+            timestamp: new Date().toLocaleTimeString('ja-JP'),
+            speaker: speakerRole,
+            originalSpeaker: speaker,
+            isFinal
+          };
+          resolvedTranscriptId = transcript.id;
+          activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+          setTranscripts(prev => [...prev, transcript]);
+        }
+
+        if (!resolvedTranscriptId) {
+          return;
+        }
+
+        activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+
+        if (isFinal) {
+          lastFinalTranscriptRef.current[speaker] = {
+            timestamp: Date.now(),
+            messageId: resolvedTranscriptId
+          };
+        }
+
+        const shouldCheckLLM = !isIdentifyingRef.current && isFinal && trimmedText.length > 0;
+        console.log(`🔍 LLM処理条件チェック: isIdentifying=${isIdentifyingRef.current}, isFinal=${isFinal}, hasText=${trimmedText.length > 0}, shouldCheck=${shouldCheckLLM}`);
+
         if (shouldCheckLLM) {
-          // refから最新の面接官情報を取得
           const currentInterviewer = interviewerSpeakerRef.current;
           console.log(`🔍 詳細チェック: speaker=${speaker}, interviewer=${currentInterviewer}, match=${speaker === currentInterviewer}`);
-          
+
           if (currentInterviewer && speaker === currentInterviewer) {
-            lastInterviewerQuestionRef.current = text.trim();
-            console.log('💬 ✅ 面接官の質問を検出、LLM処理開始:', text.trim().substring(0, 50) + '...');
-            handleLLMResponse(text.trim());
+            lastInterviewerQuestionRef.current = trimmedText;
+            console.log('💬 ✅ 面接官の質問を検出、LLM処理開始:', trimmedText.substring(0, 50) + '...');
+            handleLLMResponse(trimmedText);
           } else {
             console.log(`📝 ❌ 非面接官の発言またはインタビュアー未設定: speaker=${speaker}, interviewer=${currentInterviewer}`);
           }
@@ -417,13 +743,15 @@ ${conversationText}
     setIsRunning(false);
     setStatus('停止');
     setAudioLevel(0);
+    activeTranscriptMapRef.current = {};
+    lastFinalTranscriptRef.current = {};
     
     // 識別状態はリセットしない（結果を保持）
     
     console.log('✅ 機能テスト停止完了');
   };
 
-  const handleLLMResponse = async (question: string) => {
+  const handleLLMResponse = async (question: string, replaceId?: string) => {
     console.log('🤖 handleLLMResponse呼び出し:', question);
     setDebugInfo('LLM応答生成中...');
     
@@ -469,7 +797,7 @@ ${conversationText}
       }
       
       const response: LLMResponseItem = {
-        id: Date.now().toString(),
+        id: replaceId || Date.now().toString(),
         question,
         answer,
         timestamp: new Date().toLocaleTimeString('ja-JP')
@@ -477,6 +805,9 @@ ${conversationText}
       
       console.log('🤖 LLM応答を状態に追加');
       setLLMResponses(prev => {
+        if (replaceId) {
+          return prev.map(item => (item.id === replaceId ? response : item));
+        }
         console.log('🤖 現在のLLM応答数:', prev.length);
         return [response, ...prev];
       });
@@ -554,7 +885,7 @@ ${conversationText}
         {/* Left Panel - Transcripts */}
         <div className={`flex-1 flex flex-col border-r ${themeClasses.border} ${themeClasses.bgCard}`}>
           <div className={`px-6 py-4 border-b ${themeClasses.border}`}>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <h2 className={`text-sm font-semibold ${themeClasses.text} flex items-center gap-2`}>
                   <MessageSquare className="w-4 h-4" />
@@ -564,21 +895,55 @@ ${conversationText}
                   {settings.sttSettings.enableSpeakerDiarization ? '話者分離: 有効' : '話者分離: 無効'}
                 </p>
               </div>
-              
-              {/* Audio Level Indicator */}
-              {isRunning && (
-                <div className="flex items-center gap-2">
-                  <Mic className="w-4 h-4 text-blue-600" />
-                  <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-gradient-to-r from-green-400 via-yellow-400 to-red-400 transition-all duration-150"
-                      style={{ width: `${audioLevel}%` }}
-                    ></div>
+              <div className="flex items-center gap-3 flex-wrap">
+                {isRunning && (
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-4 h-4 text-blue-600" />
+                    <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-green-400 via-yellow-400 to-red-400 transition-all duration-150"
+                        style={{ width: `${audioLevel}%` }}
+                      ></div>
+                    </div>
+                    <span className="text-xs font-mono text-gray-600">{audioLevel}%</span>
                   </div>
-                  <span className="text-xs font-mono text-gray-600">{audioLevel}%</span>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => manuallySetInterviewer('spk1')}
+                    className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    Speaker 1 は面接官
+                  </button>
+                  <button
+                    onClick={() => manuallySetInterviewer('spk2')}
+                    className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    Speaker 2 は面接官
+                  </button>
                 </div>
-              )}
+                <button
+                  onClick={handleReidentify}
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  再識別
+                </button>
+              </div>
             </div>
+            {isRunning && isIdentifying && (
+              <div className="mt-4">
+                <div className="relative w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-500"
+                    style={{ width: `${Math.min(100, (elapsedSeconds / 60) * 100)}%` }}
+                  ></div>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  面接官識別まで {remainingSeconds} 秒
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -590,37 +955,97 @@ ${conversationText}
               </div>
             ) : (
               <div className="space-y-3">
-                {transcripts.map((item) => (
-                  <div
-                    key={item.id}
-                    className={`p-3 rounded-lg border ${
-                      item.speaker === 'interviewer'
-                        ? 'bg-blue-50 border-blue-200'
-                        : 'bg-green-50 border-green-200'
-                    } ${!item.isFinal ? 'opacity-60' : ''}`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`text-xs font-semibold ${
-                        item.speaker === 'interviewer' ? 'text-blue-700' : 'text-green-700'
-                      }`}>
-                        {isIdentifying ? (
-                          // 識別中は "Speaker 1", "Speaker 2" と表示
-                          item.originalSpeaker === 'spk1' ? 'Speaker 1' : 
-                          item.originalSpeaker === 'spk2' ? 'Speaker 2' : 
-                          'Speaker ' + item.originalSpeaker.replace('spk', '')
-                        ) : (
-                          // 識別完了後は "面接官" または "あなた"
-                          item.speaker === 'interviewer' ? '面接官' : 'あなた'
+                {transcripts.map((item) => {
+                  const isEditing = editingMessageId === item.id;
+                  return (
+                    <div
+                      key={item.id}
+                      className={`p-3 rounded-lg border ${
+                        item.speaker === 'interviewer'
+                          ? 'bg-blue-50 border-blue-200'
+                          : 'bg-green-50 border-green-200'
+                      } ${!item.isFinal ? 'opacity-60' : ''}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs font-semibold ${
+                          item.speaker === 'interviewer' ? 'text-blue-700' : 'text-green-700'
+                        }`}>
+                          {isIdentifying ? (
+                            item.originalSpeaker === 'spk1'
+                              ? 'Speaker 1'
+                              : item.originalSpeaker === 'spk2'
+                              ? 'Speaker 2'
+                              : 'Speaker ' + item.originalSpeaker.replace('spk', '')
+                          ) : item.speaker === 'interviewer' ? (
+                            '面接官'
+                          ) : (
+                            'あなた'
+                          )}
+                        </span>
+                        <span className="text-xs text-gray-400">{item.timestamp}</span>
+                        {item.isFinal && (
+                          <select
+                            value={item.originalSpeaker || ''}
+                            onChange={(event) =>
+                              handleChangeTranscriptSpeaker(item.id, event.target.value)
+                            }
+                            className="text-xs border border-gray-300 rounded px-2 py-1 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            aria-label="話者を変更"
+                          >
+                            {!item.originalSpeaker && <option value="">未分類</option>}
+                            {diarizationSpeakers.map(speakerId => (
+                              <option key={speakerId} value={speakerId}>
+                                {formatSpeakerOptionLabel(speakerId)}
+                              </option>
+                            ))}
+                          </select>
                         )}
-                      </span>
-                      <span className="text-xs text-gray-400">{item.timestamp}</span>
-                      {!item.isFinal && (
-                        <span className="text-xs text-gray-500 ml-auto">...</span>
+                        {item.isFinal && (
+                          <button
+                            onClick={() => beginEditTranscript(item)}
+                            className="ml-auto text-xs text-blue-600 hover:underline flex items-center gap-1"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            編集
+                          </button>
+                        )}
+                        {!item.isFinal && (
+                          <span className="ml-auto text-xs text-gray-500">...</span>
+                        )}
+                      </div>
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <textarea
+                            value={editedText}
+                            onChange={(e) => setEditedText(e.target.value)}
+                            className="w-full text-sm border border-blue-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white text-gray-900"
+                            rows={3}
+                          />
+                          <div className="flex items-center gap-2 justify-end">
+                            <button
+                              onClick={saveEditTranscript}
+                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              保存
+                            </button>
+                            <button
+                              onClick={cancelEditTranscript}
+                              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              キャンセル
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className={`${getFontSize()} ${themeClasses.text} leading-relaxed whitespace-normal break-words overflow-wrap-anywhere`}>
+                          {item.text}
+                        </p>
                       )}
                     </div>
-                    <p className={`${getFontSize()} ${themeClasses.text} leading-relaxed whitespace-normal break-words overflow-wrap-anywhere`}>{item.text}</p>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -670,9 +1095,16 @@ ${conversationText}
                       <div className="flex items-center gap-2 mb-2">
                         <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                         <span className="text-xs font-semibold text-gray-700">AI生成</span>
+                        <button
+                          onClick={() => handleRegenerateResponse(response)}
+                          className="ml-auto flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          再生成
+                        </button>
                       </div>
                       <p className="text-sm text-gray-900 leading-relaxed whitespace-pre-line">
-                        {response.answer}
+                        {renderHighlightedAnswer(response.answer)}
                       </p>
                     </div>
                     

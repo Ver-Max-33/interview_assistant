@@ -1,4 +1,5 @@
 import type { QAPair, MatchResult } from '../types';
+import { httpRequest } from './http-client';
 
 export class ScriptMatcher {
   private qaList: QAPair[] = [];
@@ -89,23 +90,25 @@ export class ScriptMatcher {
   }
   
   private async getEmbedding(text: string, apiKey: string): Promise<number[]> {
-    const response = await fetch('https://api.openai.com/v1/embeddings', {
+    const response = await httpRequest('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
+      body: {
         model: 'text-embedding-3-small',
         input: text
-      })
+      }
     });
     
     if (!response.ok) {
-      throw new Error(`Embedding API エラー: ${response.status}`);
+      const message =
+        (response.body as any)?.error?.message || response.status;
+      throw new Error(`Embedding API エラー: ${message}`);
     }
     
-    const data = await response.json();
+    const data = response.body as any;
     return data.data[0].embedding;
   }
   
@@ -129,4 +132,3 @@ export class ScriptMatcher {
 }
 
 export const scriptMatcher = new ScriptMatcher();
-

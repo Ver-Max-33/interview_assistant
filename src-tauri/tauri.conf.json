@@ -29,8 +29,10 @@
     }
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "面接アシスタント",
         "width": 1400,
         "height": 900,
@@ -47,4 +49,3 @@
     }
   }
 }
-
