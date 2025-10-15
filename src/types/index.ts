@@ -73,6 +73,10 @@ export interface Message {
   timestamp: string;
   originalSpeaker?: string; // spk1, spk2 など（面接官識別用）
   isFinal?: boolean; // 最終結果かどうか（転写用）
+  startMs?: number;
+  endMs?: number;
+  utteranceKey?: string;
+  createdAtMs?: number;
 }
 
 export interface Suggestion {

@@ -44,6 +44,12 @@ export interface SonioxResponse {
   error_message?: string;
 }
 
+export interface TranscriptMeta {
+  startMs?: number;
+  endMs?: number;
+  utteranceKey?: string;
+}
+
 export class SonioxSTTService {
   private ws: WebSocket | null = null;
   private config: SonioxConfig | null = null;
@@ -59,7 +65,7 @@ export class SonioxSTTService {
   private currentNonFinalTokens: SonioxToken[] = [];
   
   // Callbacks
-  public onTranscript?: (text: string, isFinal: boolean, speaker?: string) => void;
+  public onTranscript?: (text: string, isFinal: boolean, speaker?: string, meta?: TranscriptMeta) => void;
   public onError?: (error: string) => void;
   public onConnected?: () => void;
   
@@ -179,6 +185,52 @@ export class SonioxSTTService {
     this.lastAudioSentAt = Date.now();
   }
   
+  private buildTranscriptMeta(tokens: SonioxToken[], text: string): TranscriptMeta | undefined {
+    if (tokens.length === 0 && !text) {
+      return undefined;
+    }
+
+    const firstTokenWithTime = tokens.find(token => typeof token.start_ms === 'number' || typeof token.end_ms === 'number');
+    const lastTokenWithTime = [...tokens].reverse().find(token => typeof token.start_ms === 'number' || typeof token.end_ms === 'number');
+
+    const startMs = firstTokenWithTime
+      ? (typeof firstTokenWithTime.start_ms === 'number'
+          ? firstTokenWithTime.start_ms
+          : firstTokenWithTime.end_ms)
+      : undefined;
+
+    const endMs = lastTokenWithTime
+      ? (typeof lastTokenWithTime.end_ms === 'number'
+          ? lastTokenWithTime.end_ms
+          : lastTokenWithTime.start_ms)
+      : undefined;
+
+    const meta: TranscriptMeta = {};
+    if (typeof startMs === 'number') {
+      meta.startMs = startMs;
+    }
+    if (typeof endMs === 'number') {
+      meta.endMs = endMs;
+    }
+
+    if (typeof meta.startMs === 'number' && typeof meta.endMs === 'number') {
+      meta.utteranceKey = `${Math.round(meta.startMs)}-${Math.round(meta.endMs)}-${text.length}`;
+    } else if (text) {
+      meta.utteranceKey = `text:${text.length}:${text.slice(0, 16)}`;
+    }
+
+    return meta;
+  }
+
+  private emitTranscript(text: string, isFinal: boolean, speaker: string | null, tokens: SonioxToken[]): void {
+    const trimmed = text.trim();
+    if (!trimmed || !speaker) {
+      return;
+    }
+    const meta = this.buildTranscriptMeta(tokens, trimmed);
+    this.onTranscript?.(trimmed, isFinal, speaker, meta);
+  }
+  
   private handleResponse(response: SonioxResponse): void {
     // デバッグ: 生のレスポンスを表示（最初の数回のみ）
     if (!this.responseCount) this.responseCount = 0;
@@ -200,9 +252,7 @@ export class SonioxSTTService {
       // 最後の発話を送信
       if (this.currentSpeaker && this.currentFinalTokens.length > 0) {
         const text = this.currentFinalTokens.map(t => t.text).join('');
-        if (text.trim()) {
-          this.onTranscript?.(text.trim(), true, this.currentSpeaker);
-        }
+        this.emitTranscript(text, true, this.currentSpeaker, this.currentFinalTokens);
       }
       return;
     }
@@ -244,10 +294,8 @@ export class SonioxSTTService {
           // 前のspeakerの発話を完了して送信
           if (this.currentFinalTokens.length > 0) {
             const text = this.currentFinalTokens.map(t => t.text).join('');
-            if (text.trim()) {
-              console.log(`📤 前のspeaker [${this.currentSpeaker}] の発話完了: "${text.substring(0, 50)}..."`);
-              this.onTranscript?.(text.trim(), true, this.currentSpeaker);
-            }
+            console.log(`📤 前のspeaker [${this.currentSpeaker}] の発話完了: "${text.substring(0, 50)}..."`);
+            this.emitTranscript(text, true, this.currentSpeaker, this.currentFinalTokens);
           }
           
           // 新しいspeakerにリセット
@@ -285,9 +333,7 @@ export class SonioxSTTService {
         console.log(`🎤 現在の転写 [${this.currentSpeaker}] final:${this.currentFinalTokens.length}, non-final:${this.currentNonFinalTokens.length}`);
         console.log(`   テキスト: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
         
-        if (text.trim() && this.currentSpeaker) {
-          this.onTranscript?.(text.trim(), isFinal, this.currentSpeaker);
-        }
+        this.emitTranscript(text, isFinal, this.currentSpeaker, allTokens);
       }
       
       // <end>タグが検出された場合の処理
@@ -296,7 +342,7 @@ export class SonioxSTTService {
         // 空の転写を送信してUI側に「話し終わった」ことを通知
         if (this.currentSpeaker) {
           console.log(`📤 <end>シグナルをUIに送信: speaker=${this.currentSpeaker}`);
-          this.onTranscript?.('', true, this.currentSpeaker);
+          this.onTranscript?.('', true, this.currentSpeaker, this.buildTranscriptMeta([], ''));
         }
         // 次のutteranceのために状態をリセット（speakerは保持）
         this.currentFinalTokens = [];

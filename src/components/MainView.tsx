@@ -30,7 +30,7 @@ import type {
   Message,
   Suggestion
 } from '../types';
-import { sonioxService } from '../services/soniox';
+import { sonioxService, type TranscriptMeta } from '../services/soniox';
 import { llmService, type LLMMessage } from '../services/llm';
 import { audioCaptureService } from '../services/audio-capture';
 import { scriptMatcher } from '../services/script-matcher';
@@ -150,6 +150,19 @@ export default function MainView({
   const pausedDurationRef = useRef<number>(0);
   const activeMessageMapRef = useRef<Record<string, string>>({});
   const lastFinalInfoRef = useRef<Record<string, { timestamp: number; messageId: string }>>({});
+  const activeUtteranceMapRef = useRef<
+    Record<
+      string,
+      {
+        messageId: string;
+        speaker: string;
+        updatedAt: number;
+        isFinal: boolean;
+        startMs?: number;
+        endMs?: number;
+      }
+    >
+  >({});
   const headerSummaryGeneratedRef = useRef<boolean>(false);
 
   const keywords = useMemo(() => extractKeywords(preparationData), [preparationData]);
@@ -203,6 +216,36 @@ export default function MainView({
     },
     [keywordRegex, keywordLookup]
   );
+
+  const sortConversationByTimeline = useCallback((items: Message[]): Message[] => {
+    const sorted = [...items];
+    sorted.sort((a, b) => {
+      const aStart =
+        typeof a.startMs === 'number'
+          ? a.startMs
+          : typeof a.createdAtMs === 'number'
+            ? a.createdAtMs
+            : Number.MAX_SAFE_INTEGER;
+      const bStart =
+        typeof b.startMs === 'number'
+          ? b.startMs
+          : typeof b.createdAtMs === 'number'
+            ? b.createdAtMs
+            : Number.MAX_SAFE_INTEGER;
+      if (aStart !== bStart) {
+        return aStart - bStart;
+      }
+      const aCreated =
+        typeof a.createdAtMs === 'number' ? a.createdAtMs : Number.MAX_SAFE_INTEGER;
+      const bCreated =
+        typeof b.createdAtMs === 'number' ? b.createdAtMs : Number.MAX_SAFE_INTEGER;
+      if (aCreated !== bCreated) {
+        return aCreated - bCreated;
+      }
+      return a.id.localeCompare(b.id);
+    });
+    return sorted;
+  }, []);
 
   useEffect(() => {
     setCompanySummary(buildDefaultHeaderSummary(preparationData));
@@ -457,6 +500,7 @@ ${conversationText}
     setError('');
     setIsGenerating(false);
     activeMessageMapRef.current = {};
+    activeUtteranceMapRef.current = {};
     setCompanySummary(buildDefaultHeaderSummary(preparationData));
     headerSummaryGeneratedRef.current = false;
     lastFinalInfoRef.current = {};
@@ -492,17 +536,55 @@ ${conversationText}
       activeMessageMapRef.current = {};
       lastFinalInfoRef.current = {};
 
-      sonioxService.onTranscript = (text: string, isFinal: boolean, speaker?: string) => {
+      sonioxService.onTranscript = (
+        text: string,
+        isFinal: boolean,
+        speaker?: string,
+        meta?: TranscriptMeta
+      ) => {
         if (!speaker) {
           console.warn('⚠️ speaker が空です');
           return;
         }
 
         const trimmedText = text.trim();
+        const eventTimestamp = Date.now();
+        const metaStartMs = typeof meta?.startMs === 'number' ? meta.startMs : undefined;
+        const metaEndMs = typeof meta?.endMs === 'number' ? meta.endMs : undefined;
+
+        // 古い発話情報のクリーンアップ（2分以上経過したfinalを破棄）
+        Object.entries(activeUtteranceMapRef.current).forEach(([key, entry]) => {
+          if (entry.isFinal && eventTimestamp - entry.updatedAt > 120000) {
+            if (activeMessageMapRef.current[entry.speaker] === entry.messageId) {
+              delete activeMessageMapRef.current[entry.speaker];
+            }
+            if (
+              lastFinalInfoRef.current[entry.speaker]?.messageId === entry.messageId
+            ) {
+              delete lastFinalInfoRef.current[entry.speaker];
+            }
+            delete activeUtteranceMapRef.current[key];
+          }
+        });
+
+        const utteranceKey = meta?.utteranceKey;
+        const utteranceEntry = utteranceKey
+          ? activeUtteranceMapRef.current[utteranceKey]
+          : undefined;
+        const previousSpeakerForUtterance = utteranceEntry?.speaker;
 
         if (!trimmedText && isFinal) {
           delete activeMessageMapRef.current[speaker];
           delete lastFinalInfoRef.current[speaker];
+          if (utteranceKey) {
+            delete activeUtteranceMapRef.current[utteranceKey];
+          } else {
+            Object.entries(activeUtteranceMapRef.current).forEach(([key, entry]) => {
+              if (entry.speaker === speaker) {
+                delete activeUtteranceMapRef.current[key];
+              }
+            });
+          }
           setCurrentSpeaker(null);
           setCurrentOriginalSpeaker(null);
           return;
@@ -513,26 +595,55 @@ ${conversationText}
         }
 
         if (isIdentifyingRef.current) {
-          const now = Date.now();
           const pausedDuration =
             pausedDurationRef.current +
-            (pauseStartedAtRef.current ? now - pauseStartedAtRef.current : 0);
-          const elapsed = (now - startTimeRef.current - pausedDuration) / 1000;
+            (pauseStartedAtRef.current
+              ? eventTimestamp - pauseStartedAtRef.current
+              : 0);
+          const elapsed =
+            (eventTimestamp - startTimeRef.current - pausedDuration) / 1000;
           const transcriptLength = identificationTranscriptsRef.current.length;
 
           if (isFinal) {
             const transcripts = identificationTranscriptsRef.current;
-            const lastEntry = transcripts[transcripts.length - 1];
-            if (lastEntry && lastEntry.speaker === speaker) {
-              transcripts[transcripts.length - 1] = {
-                speaker,
-                text: trimmedText
-              };
+            const handledByReassignment =
+              utteranceEntry &&
+              previousSpeakerForUtterance &&
+              previousSpeakerForUtterance !== speaker;
+
+            if (handledByReassignment) {
+              const reversedIndex = [...transcripts]
+                .reverse()
+                .findIndex(
+                  entry =>
+                    entry.speaker === previousSpeakerForUtterance &&
+                    entry.text === trimmedText
+                );
+              if (reversedIndex >= 0) {
+                const actualIndex = transcripts.length - 1 - reversedIndex;
+                transcripts[actualIndex] = {
+                  speaker,
+                  text: trimmedText
+                };
+              } else {
+                transcripts.push({
+                  speaker,
+                  text: trimmedText
+                });
+              }
             } else {
-              transcripts.push({
-                speaker,
-                text: trimmedText
-              });
+              const lastEntry = transcripts[transcripts.length - 1];
+              if (lastEntry && lastEntry.speaker === speaker) {
+                transcripts[transcripts.length - 1] = {
+                  speaker,
+                  text: trimmedText
+                };
+              } else {
+                transcripts.push({
+                  speaker,
+                  text: trimmedText
+                });
+              }
             }
           }
 
@@ -556,41 +667,61 @@ ${conversationText}
           speakerRole = speaker === 'spk1' ? 'interviewer' : 'user';
         }
 
-        if (!isFinal) {
+        if (!isFinal && !utteranceEntry) {
           if (lastFinalInfoRef.current[speaker]) {
             delete activeMessageMapRef.current[speaker];
             delete lastFinalInfoRef.current[speaker];
           }
         }
 
-        let resolvedMessageId: string | undefined = activeMessageMapRef.current[speaker];
+        let resolvedMessageId: string | undefined = utteranceEntry?.messageId;
 
-        if (resolvedMessageId && isFinal) {
-          const finalInfo = lastFinalInfoRef.current[speaker];
-          if (finalInfo && finalInfo.messageId === resolvedMessageId && Date.now() - finalInfo.timestamp > 2000) {
-            resolvedMessageId = undefined;
-            delete activeMessageMapRef.current[speaker];
+        if (!resolvedMessageId) {
+          resolvedMessageId = activeMessageMapRef.current[speaker];
+
+          if (resolvedMessageId && isFinal) {
+            const finalInfo = lastFinalInfoRef.current[speaker];
+            if (
+              finalInfo &&
+              finalInfo.messageId === resolvedMessageId &&
+              eventTimestamp - finalInfo.timestamp > 2000
+            ) {
+              resolvedMessageId = undefined;
+              delete activeMessageMapRef.current[speaker];
+            }
           }
-        }
 
-        if (!resolvedMessageId && isFinal) {
-          const info = lastFinalInfoRef.current[speaker];
-          if (info && Date.now() - info.timestamp <= 2000) {
-            resolvedMessageId = info.messageId;
+          if (!resolvedMessageId && isFinal) {
+            const info = lastFinalInfoRef.current[speaker];
+            if (info && eventTimestamp - info.timestamp <= 2000) {
+              resolvedMessageId = info.messageId;
+            }
           }
         }
 
         if (resolvedMessageId) {
           const targetId = resolvedMessageId;
           setConversation(prev =>
-            prev.map(item =>
-              item.id === targetId
-                ? {
-                    ...item,
-                    text: trimmedText,
-                    isFinal
-                  }
-                : item
+            sortConversationByTimeline(
+              prev.map(item =>
+                item.id === targetId
+                  ? {
+                      ...item,
+                      text: trimmedText,
+                      isFinal,
+                      speaker:
+                        item.originalSpeaker !== speaker ? speakerRole : item.speaker,
+                      originalSpeaker:
+                        item.originalSpeaker !== speaker
+                          ? speaker
+                          : item.originalSpeaker,
+                      startMs: typeof metaStartMs === 'number' ? metaStartMs : item.startMs,
+                      endMs: typeof metaEndMs === 'number' ? metaEndMs : item.endMs,
+                      utteranceKey: utteranceKey ?? item.utteranceKey,
+                      createdAtMs: item.createdAtMs ?? eventTimestamp
+                    }
+                  : item
+              )
             )
           );
         } else {
@@ -600,18 +731,56 @@ ${conversationText}
             timestamp: new Date().toLocaleTimeString('ja-JP'),
             speaker: speakerRole,
             originalSpeaker: speaker,
-            isFinal
+            isFinal,
+            startMs: metaStartMs,
+            endMs: metaEndMs,
+            utteranceKey,
+            createdAtMs: eventTimestamp
           };
           resolvedMessageId = newMessage.id;
           activeMessageMapRef.current[speaker] = resolvedMessageId;
-          setConversation(prev => [...prev, newMessage]);
+          setConversation(prev => sortConversationByTimeline([...prev, newMessage]));
         }
 
         if (!resolvedMessageId) {
           return;
         }
 
+        if (
+          previousSpeakerForUtterance &&
+          previousSpeakerForUtterance !== speaker &&
+          utteranceEntry
+        ) {
+          if (
+            activeMessageMapRef.current[previousSpeakerForUtterance] ===
+            resolvedMessageId
+          ) {
+            delete activeMessageMapRef.current[previousSpeakerForUtterance];
+          }
+          if (
+            lastFinalInfoRef.current[previousSpeakerForUtterance]?.messageId ===
+            resolvedMessageId
+          ) {
+            delete lastFinalInfoRef.current[previousSpeakerForUtterance];
+          }
+        }
+
         activeMessageMapRef.current[speaker] = resolvedMessageId;
+
+        if (utteranceKey) {
+          activeUtteranceMapRef.current[utteranceKey] = {
+            messageId: resolvedMessageId,
+            speaker,
+            updatedAt: eventTimestamp,
+            isFinal,
+            startMs:
+              typeof metaStartMs === 'number'
+                ? metaStartMs
+                : utteranceEntry?.startMs,
+            endMs:
+              typeof metaEndMs === 'number' ? metaEndMs : utteranceEntry?.endMs
+          };
+        }
 
         if (!isFinal) {
           setCurrentSpeaker(speakerRole);
@@ -620,9 +789,23 @@ ${conversationText}
           setCurrentSpeaker(null);
           setCurrentOriginalSpeaker(null);
           lastFinalInfoRef.current[speaker] = {
-            timestamp: Date.now(),
+            timestamp: eventTimestamp,
             messageId: resolvedMessageId
           };
+
+          if (utteranceKey) {
+            const entry = activeUtteranceMapRef.current[utteranceKey];
+            if (entry) {
+              entry.isFinal = true;
+              entry.updatedAt = eventTimestamp;
+              if (typeof metaStartMs === 'number') {
+                entry.startMs = metaStartMs;
+              }
+              if (typeof metaEndMs === 'number') {
+                entry.endMs = metaEndMs;
+              }
+            }
+          }
         }
 
         const shouldCheckLLM =

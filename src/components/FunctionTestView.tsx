@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { X, PlayCircle, StopCircle, Mic, MessageSquare, Brain, CheckCircle, AlertCircle, RefreshCw, Edit3, Save, XCircle } from 'lucide-react';
 import type { Settings as SettingsType } from '../types';
-import { sonioxService } from '../services/soniox';
+import { sonioxService, type TranscriptMeta } from '../services/soniox';
 import { llmService, type LLMMessage } from '../services/llm';
 import { audioCaptureService } from '../services/audio-capture';
 import { useTheme } from '../hooks/useTheme';
@@ -18,6 +18,10 @@ interface TranscriptItem {
   speaker: 'user' | 'interviewer';
   originalSpeaker: string; // spk1, spk2 など
   isFinal: boolean;
+  startMs?: number;
+  endMs?: number;
+  utteranceKey?: string;
+  createdAtMs?: number;
 }
 
 interface LLMResponseItem {
@@ -54,6 +58,19 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
   const identificationTranscriptsRef = useRef<Array<{ speaker: string; text: string }>>([]);
   const activeTranscriptMapRef = useRef<Record<string, string>>({});
   const lastFinalTranscriptRef = useRef<Record<string, { timestamp: number; messageId: string }>>({});
+  const activeUtteranceMapRef = useRef<
+    Record<
+      string,
+      {
+        transcriptId: string;
+        speaker: string;
+        updatedAt: number;
+        isFinal: boolean;
+        startMs?: number;
+        endMs?: number;
+      }
+    >
+  >({});
   const keywords = useMemo(() => {
     const STOPWORDS = new Set([
       'です',
@@ -181,6 +198,36 @@ export default function FunctionTestView({ settings, onClose }: FunctionTestView
     },
     [interviewerSpeaker]
   );
+
+  const sortTranscriptsByTimeline = useCallback((items: TranscriptItem[]): TranscriptItem[] => {
+    const sorted = [...items];
+    sorted.sort((a, b) => {
+      const aStart =
+        typeof a.startMs === 'number'
+          ? a.startMs
+          : typeof a.createdAtMs === 'number'
+            ? a.createdAtMs
+            : Number.MAX_SAFE_INTEGER;
+      const bStart =
+        typeof b.startMs === 'number'
+          ? b.startMs
+          : typeof b.createdAtMs === 'number'
+            ? b.createdAtMs
+            : Number.MAX_SAFE_INTEGER;
+      if (aStart !== bStart) {
+        return aStart - bStart;
+      }
+      const aCreated =
+        typeof a.createdAtMs === 'number' ? a.createdAtMs : Number.MAX_SAFE_INTEGER;
+      const bCreated =
+        typeof b.createdAtMs === 'number' ? b.createdAtMs : Number.MAX_SAFE_INTEGER;
+      if (aCreated !== bCreated) {
+        return aCreated - bCreated;
+      }
+      return a.id.localeCompare(b.id);
+    });
+    return sorted;
+  }, []);
 
   useEffect(() => {
     if (!isIdentifying) {
@@ -502,6 +549,7 @@ ${conversationText}
       setEditedText('');
       activeTranscriptMapRef.current = {};
       lastFinalTranscriptRef.current = {};
+      activeUtteranceMapRef.current = {};
       
       console.log('🎬 機能テスト開始...');
 
@@ -515,18 +563,58 @@ ${conversationText}
       });
 
       // Soniox STTコールバックを設定
-      sonioxService.onTranscript = (text: string, isFinal: boolean, speaker?: string) => {
+      sonioxService.onTranscript = (
+        text: string,
+        isFinal: boolean,
+        speaker?: string,
+        meta?: TranscriptMeta
+      ) => {
         const trimmedText = text.trim();
-        console.log(`📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSpeakerRef.current}]:`, trimmedText.substring(0, 50));
+        const eventTimestamp = Date.now();
+        const metaStartMs = typeof meta?.startMs === 'number' ? meta.startMs : undefined;
+        const metaEndMs = typeof meta?.endMs === 'number' ? meta.endMs : undefined;
+        console.log(
+          `📝 転写受信 [speaker="${speaker}", isFinal=${isFinal}, isIdentifying=${isIdentifyingRef.current}, interviewer=${interviewerSpeakerRef.current}]:`,
+          trimmedText.substring(0, 50)
+        );
 
         if (!speaker) {
           console.warn('⚠️ speaker が空です');
           return;
         }
 
+        Object.entries(activeUtteranceMapRef.current).forEach(([key, entry]) => {
+          if (entry.isFinal && eventTimestamp - entry.updatedAt > 120000) {
+            if (activeTranscriptMapRef.current[entry.speaker] === entry.transcriptId) {
+              delete activeTranscriptMapRef.current[entry.speaker];
+            }
+            if (
+              lastFinalTranscriptRef.current[entry.speaker]?.messageId === entry.transcriptId
+            ) {
+              delete lastFinalTranscriptRef.current[entry.speaker];
+            }
+            delete activeUtteranceMapRef.current[key];
+          }
+        });
+
+        const utteranceKey = meta?.utteranceKey;
+        const utteranceEntry = utteranceKey
+          ? activeUtteranceMapRef.current[utteranceKey]
+          : undefined;
+        const previousSpeakerForUtterance = utteranceEntry?.speaker;
+
         if (!trimmedText && isFinal) {
           delete activeTranscriptMapRef.current[speaker];
           delete lastFinalTranscriptRef.current[speaker];
+          if (utteranceKey) {
+            delete activeUtteranceMapRef.current[utteranceKey];
+          } else {
+            Object.entries(activeUtteranceMapRef.current).forEach(([key, entry]) => {
+              if (entry.speaker === speaker) {
+                delete activeUtteranceMapRef.current[key];
+              }
+            });
+          }
           return;
         }
 
@@ -535,18 +623,41 @@ ${conversationText}
         }
 
         if (isIdentifyingRef.current) {
-          const elapsedTime = (Date.now() - startTimeRef.current) / 1000;
+          const elapsedTime = (eventTimestamp - startTimeRef.current) / 1000;
 
           if (isFinal) {
             const transcripts = identificationTranscriptsRef.current;
-            const lastEntry = transcripts[transcripts.length - 1];
-            if (lastEntry && lastEntry.speaker === speaker) {
-              transcripts[transcripts.length - 1] = { speaker, text: trimmedText };
+            const handledByReassignment =
+              utteranceEntry &&
+              previousSpeakerForUtterance &&
+              previousSpeakerForUtterance !== speaker;
+
+            if (handledByReassignment) {
+              const reversedIndex = [...transcripts]
+                .reverse()
+                .findIndex(
+                  entry =>
+                    entry.speaker === previousSpeakerForUtterance &&
+                    entry.text === trimmedText
+                );
+              if (reversedIndex >= 0) {
+                const actualIndex = transcripts.length - 1 - reversedIndex;
+                transcripts[actualIndex] = { speaker, text: trimmedText };
+              } else {
+                transcripts.push({ speaker, text: trimmedText });
+              }
             } else {
-              transcripts.push({ speaker, text: trimmedText });
+              const lastEntry = transcripts[transcripts.length - 1];
+              if (lastEntry && lastEntry.speaker === speaker) {
+                transcripts[transcripts.length - 1] = { speaker, text: trimmedText };
+              } else {
+                transcripts.push({ speaker, text: trimmedText });
+              }
             }
 
-            console.log(`🔍 識別データ収集中: ${elapsedTime.toFixed(1)}秒経過, ${transcripts.length}件`);
+            console.log(
+              `🔍 識別データ収集中: ${elapsedTime.toFixed(1)}秒経過, ${transcripts.length}件`
+            );
             setDebugInfo(`識別データ収集中: ${elapsedTime.toFixed(0)}秒/${60}秒`);
           }
 
@@ -561,45 +672,65 @@ ${conversationText}
         if (interviewerSpeakerRef.current) {
           const isMatch = speaker === interviewerSpeakerRef.current;
           speakerRole = isMatch ? 'interviewer' : 'user';
-          console.log(`👤 話者判定 [識別済み]: "${speaker}" === "${interviewerSpeakerRef.current}"? ${isMatch} → role=${speakerRole}`);
+          console.log(
+            `👤 話者判定 [識別済み]: "${speaker}" === "${interviewerSpeakerRef.current}"? ${isMatch} → role=${speakerRole}`
+          );
         } else {
           speakerRole = speaker === 'spk1' ? 'interviewer' : 'user';
           console.log(`👤 話者判定 [識別中]: speaker=${speaker}, 暫定role=${speakerRole}`);
         }
 
-        if (!isFinal && lastFinalTranscriptRef.current[speaker]) {
+        if (!isFinal && !utteranceEntry && lastFinalTranscriptRef.current[speaker]) {
           delete activeTranscriptMapRef.current[speaker];
           delete lastFinalTranscriptRef.current[speaker];
         }
 
-        let resolvedTranscriptId: string | undefined = activeTranscriptMapRef.current[speaker];
+        let resolvedTranscriptId: string | undefined = utteranceEntry?.transcriptId;
 
-        if (resolvedTranscriptId && isFinal) {
-          const finalInfo = lastFinalTranscriptRef.current[speaker];
-          if (finalInfo && finalInfo.messageId === resolvedTranscriptId && Date.now() - finalInfo.timestamp > 2000) {
-            resolvedTranscriptId = undefined;
-            delete activeTranscriptMapRef.current[speaker];
+        if (!resolvedTranscriptId) {
+          resolvedTranscriptId = activeTranscriptMapRef.current[speaker];
+
+          if (resolvedTranscriptId && isFinal) {
+            const finalInfo = lastFinalTranscriptRef.current[speaker];
+            if (
+              finalInfo &&
+              finalInfo.messageId === resolvedTranscriptId &&
+              eventTimestamp - finalInfo.timestamp > 2000
+            ) {
+              resolvedTranscriptId = undefined;
+              delete activeTranscriptMapRef.current[speaker];
+            }
           }
-        }
 
-        if (!resolvedTranscriptId && isFinal) {
-          const info = lastFinalTranscriptRef.current[speaker];
-          if (info && Date.now() - info.timestamp <= 2000) {
-            resolvedTranscriptId = info.messageId;
+          if (!resolvedTranscriptId && isFinal) {
+            const info = lastFinalTranscriptRef.current[speaker];
+            if (info && eventTimestamp - info.timestamp <= 2000) {
+              resolvedTranscriptId = info.messageId;
+            }
           }
         }
 
         if (resolvedTranscriptId) {
           const targetId = resolvedTranscriptId;
           setTranscripts(prev =>
-            prev.map(item =>
-              item.id === targetId
-                ? {
-                    ...item,
-                    text: trimmedText,
-                    isFinal
-                  }
-                : item
+            sortTranscriptsByTimeline(
+              prev.map(item =>
+                item.id === targetId
+                  ? {
+                      ...item,
+                      text: trimmedText,
+                      isFinal,
+                      speaker:
+                        item.originalSpeaker !== speaker ? speakerRole : item.speaker,
+                      originalSpeaker:
+                        item.originalSpeaker !== speaker ? speaker : item.originalSpeaker,
+                      startMs: typeof metaStartMs === 'number' ? metaStartMs : item.startMs,
+                      endMs: typeof metaEndMs === 'number' ? metaEndMs : item.endMs,
+                      utteranceKey: utteranceKey ?? item.utteranceKey,
+                      createdAtMs: item.createdAtMs ?? eventTimestamp
+                    }
+                  : item
+              )
             )
           );
         } else {
@@ -609,39 +740,101 @@ ${conversationText}
             timestamp: new Date().toLocaleTimeString('ja-JP'),
             speaker: speakerRole,
             originalSpeaker: speaker,
-            isFinal
+            isFinal,
+            startMs: metaStartMs,
+            endMs: metaEndMs,
+            utteranceKey,
+            createdAtMs: eventTimestamp
           };
           resolvedTranscriptId = transcript.id;
           activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
-          setTranscripts(prev => [...prev, transcript]);
+          setTranscripts(prev => sortTranscriptsByTimeline([...prev, transcript]));
         }
 
         if (!resolvedTranscriptId) {
           return;
         }
 
+        if (
+          previousSpeakerForUtterance &&
+          previousSpeakerForUtterance !== speaker &&
+          utteranceEntry
+        ) {
+          if (
+            activeTranscriptMapRef.current[previousSpeakerForUtterance] ===
+            resolvedTranscriptId
+          ) {
+            delete activeTranscriptMapRef.current[previousSpeakerForUtterance];
+          }
+          if (
+            lastFinalTranscriptRef.current[previousSpeakerForUtterance]?.messageId ===
+            resolvedTranscriptId
+          ) {
+            delete lastFinalTranscriptRef.current[previousSpeakerForUtterance];
+          }
+        }
+
         activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
 
-        if (isFinal) {
-          lastFinalTranscriptRef.current[speaker] = {
-            timestamp: Date.now(),
-            messageId: resolvedTranscriptId
+        if (utteranceKey) {
+          activeUtteranceMapRef.current[utteranceKey] = {
+            transcriptId: resolvedTranscriptId,
+            speaker,
+            updatedAt: eventTimestamp,
+            isFinal,
+            startMs:
+              typeof metaStartMs === 'number'
+                ? metaStartMs
+                : utteranceEntry?.startMs,
+            endMs:
+              typeof metaEndMs === 'number' ? metaEndMs : utteranceEntry?.endMs
           };
         }
 
-        const shouldCheckLLM = !isIdentifyingRef.current && isFinal && trimmedText.length > 0;
-        console.log(`🔍 LLM処理条件チェック: isIdentifying=${isIdentifyingRef.current}, isFinal=${isFinal}, hasText=${trimmedText.length > 0}, shouldCheck=${shouldCheckLLM}`);
+        if (isFinal) {
+          lastFinalTranscriptRef.current[speaker] = {
+            timestamp: eventTimestamp,
+            messageId: resolvedTranscriptId
+          };
+
+          if (utteranceKey) {
+            const entry = activeUtteranceMapRef.current[utteranceKey];
+            if (entry) {
+              entry.isFinal = true;
+              entry.updatedAt = eventTimestamp;
+              if (typeof metaStartMs === 'number') {
+                entry.startMs = metaStartMs;
+              }
+              if (typeof metaEndMs === 'number') {
+                entry.endMs = metaEndMs;
+              }
+            }
+          }
+        }
+
+        const shouldCheckLLM =
+          !isIdentifyingRef.current && isFinal && trimmedText.length > 0;
+        console.log(
+          `🔍 LLM処理条件チェック: isIdentifying=${isIdentifyingRef.current}, isFinal=${isFinal}, hasText=${trimmedText.length > 0}, shouldCheck=${shouldCheckLLM}`
+        );
 
         if (shouldCheckLLM) {
           const currentInterviewer = interviewerSpeakerRef.current;
-          console.log(`🔍 詳細チェック: speaker=${speaker}, interviewer=${currentInterviewer}, match=${speaker === currentInterviewer}`);
+          console.log(
+            `🔍 詳細チェック: speaker=${speaker}, interviewer=${currentInterviewer}, match=${speaker === currentInterviewer}`
+          );
 
           if (currentInterviewer && speaker === currentInterviewer) {
             lastInterviewerQuestionRef.current = trimmedText;
-            console.log('💬 ✅ 面接官の質問を検出、LLM処理開始:', trimmedText.substring(0, 50) + '...');
+            console.log(
+              '💬 ✅ 面接官の質問を検出、LLM処理開始:',
+              trimmedText.substring(0, 50) + '...'
+            );
             handleLLMResponse(trimmedText);
           } else {
-            console.log(`📝 ❌ 非面接官の発言またはインタビュアー未設定: speaker=${speaker}, interviewer=${currentInterviewer}`);
+            console.log(
+              `📝 ❌ 非面接官の発言またはインタビュアー未設定: speaker=${speaker}, interviewer=${currentInterviewer}`
+            );
           }
         } else {
           if (isIdentifyingRef.current) {
@@ -745,6 +938,7 @@ ${conversationText}
     setAudioLevel(0);
     activeTranscriptMapRef.current = {};
     lastFinalTranscriptRef.current = {};
+    activeUtteranceMapRef.current = {};
     
     // 識別状態はリセットしない（結果を保持）
     
