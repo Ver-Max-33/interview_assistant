@@ -37,11 +37,6 @@ export default function CompactWindow() {
   const channelRef = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
-    document.body.style.backgroundColor = 'transparent';
-    document.documentElement.style.backgroundColor = 'transparent';
-  }, []);
-
-  useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channelRef.current = channel;
 
@@ -70,14 +65,43 @@ export default function CompactWindow() {
     const isDark = state?.settings.displaySettings.theme === 'dark';
     return {
       isDark,
-      bg: isDark ? 'bg-gray-900/80' : 'bg-white/90',
-      border: isDark ? 'border-gray-700/70' : 'border-gray-200/70',
-      text: isDark ? 'text-gray-100' : 'text-gray-900',
-      textMuted: isDark ? 'text-gray-400' : 'text-gray-500',
-      textLabel: isDark ? 'text-gray-300' : 'text-gray-700',
-      bgHover: isDark ? 'hover:bg-gray-800/80' : 'hover:bg-gray-100/80'
+      cardBg: isDark ? 'bg-slate-900/80' : 'bg-white/95',
+      cardBorder: isDark ? 'border-slate-700/70' : 'border-slate-200/70',
+      cardShadow: isDark
+        ? 'shadow-[0_24px_70px_rgba(15,23,42,0.55)]'
+        : 'shadow-[0_20px_60px_rgba(15,23,42,0.15)]',
+      text: isDark ? 'text-slate-100' : 'text-slate-900',
+      textMuted: isDark ? 'text-slate-400' : 'text-slate-600',
+      textLabel: isDark ? 'text-slate-300' : 'text-slate-700',
+      dragBg: isDark ? 'bg-slate-900/70' : 'bg-white/70',
+      sectionBg: isDark ? 'bg-slate-900/55' : 'bg-white/80',
+      sectionBorder: isDark ? 'border-slate-800/60' : 'border-slate-200/80',
+      subtleBorder: isDark ? 'border-slate-800/40' : 'border-slate-200/60',
+      sectionSubtleBg: isDark ? 'bg-slate-900/40' : 'bg-slate-100/60',
+      accentBg: isDark ? 'bg-blue-950/40' : 'bg-blue-50',
+      accentBorder: isDark ? 'border-blue-900/60' : 'border-blue-200',
+      sliderAccent: isDark ? 'accent-blue-300' : 'accent-blue-500',
+      hoverMuted: isDark ? 'hover:bg-slate-800/70' : 'hover:bg-slate-100/70',
+      buttonMutedBg: isDark ? 'bg-slate-800/70' : 'bg-slate-100/80',
+      dividerBorder: isDark ? 'border-slate-900/40' : 'border-slate-200/60'
     };
   }, [state?.settings.displaySettings.theme]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const previousBody = document.body.style.backgroundColor;
+    const previousRoot = document.documentElement.style.backgroundColor;
+    document.body.style.backgroundColor = 'transparent';
+    document.documentElement.style.backgroundColor = 'transparent';
+
+    return () => {
+      document.body.style.backgroundColor = previousBody;
+      document.documentElement.style.backgroundColor = previousRoot;
+    };
+  }, []);
 
   const activeSpeaker = useMemo(() => {
     if (!state) {
@@ -134,7 +158,7 @@ export default function CompactWindow() {
           ? state.latestMessage.text
           : '転写はまだありません'
     };
-  }, [state, themeClasses.isDark]);
+  }, [state]);
 
   const aiInfo = useMemo(() => {
     if (!state) {
@@ -184,32 +208,38 @@ export default function CompactWindow() {
   }, [sendCommand]);
 
   return (
-    <div className="w-full h-full p-3 bg-transparent">
+    <div className="w-full h-full bg-transparent px-3 py-4">
       <div
-        className={`${themeClasses.bg} border ${themeClasses.border} rounded-2xl shadow-2xl flex flex-col overflow-hidden backdrop-blur-xl`}
+        className={`h-full flex flex-col border ${themeClasses.cardBorder} ${themeClasses.cardBg} ${themeClasses.cardShadow} ${themeClasses.text} rounded-3xl backdrop-blur-xl overflow-hidden`}
         style={{ opacity }}
       >
-        <div
-          className={`px-4 pt-3 pb-2 border-b ${themeClasses.border} flex items-center justify-between gap-3`}
+        <header
+          className={`px-5 py-4 flex items-center justify-between gap-4 ${themeClasses.dragBg}`}
           data-tauri-drag-region
         >
-          <div className="flex items-center gap-2">
-            <Zap className="w-5 h-5 text-blue-500" />
+          <div className="flex items-center gap-3 cursor-move select-none">
+            <span data-tauri-drag-region={false}>
+              <Zap className="w-6 h-6 text-blue-500" />
+            </span>
             <div>
-              <p className={`text-sm font-semibold ${themeClasses.text}`}>コンパクトビュー</p>
+              <p className="text-sm font-semibold">コンパクトビュー</p>
               <p className={`text-xs ${themeClasses.textMuted}`}>話者とAI回答を素早く確認</p>
             </div>
           </div>
           <button
             onClick={handleClose}
-            className={`p-1.5 rounded-lg ${themeClasses.bgHover}`}
+            className={`p-2 rounded-xl ${themeClasses.buttonMutedBg} ${themeClasses.hoverMuted} transition-colors`}
             aria-label="通常モードに戻る"
+            data-tauri-drag-region={false}
           >
             <Maximize2 className={`w-4 h-4 ${themeClasses.textLabel}`} />
           </button>
-        </div>
+        </header>
 
-        <div className="px-4 py-2 flex items-center gap-3">
+        <div
+          className={`px-5 py-3 flex items-center gap-3 border-y ${themeClasses.dividerBorder} ${themeClasses.sectionBg}`}
+          data-tauri-drag-region={false}
+        >
           <Droplet className={`w-4 h-4 ${themeClasses.textMuted}`} />
           <input
             type="range"
@@ -218,16 +248,18 @@ export default function CompactWindow() {
             step={0.05}
             value={opacity}
             onChange={event => handleOpacityChange(Number(event.target.value))}
-            className="flex-1 accent-blue-500"
+            className={`flex-1 ${themeClasses.sliderAccent}`}
             aria-label="ウィンドウの透明度"
           />
-          <span className={`text-xs min-w-[40px] text-right ${themeClasses.textMuted}`}>
+          <span className={`text-xs min-w-[44px] text-right ${themeClasses.textMuted}`}>
             {Math.round(opacity * 100)}%
           </span>
         </div>
 
-        <div className="flex-1 flex flex-col divide-y divide-gray-200/70 dark:divide-gray-700/60">
-          <div className="p-4 space-y-2">
+        <main className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <section
+            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
+          >
             <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
               現在の話者
             </p>
@@ -235,9 +267,7 @@ export default function CompactWindow() {
               <span
                 className={`inline-flex w-2.5 h-2.5 rounded-full ${activeSpeaker.indicatorClass}`}
               />
-              <span className={`text-sm font-semibold ${themeClasses.text}`}>
-                {activeSpeaker.label}
-              </span>
+              <span className="text-sm font-semibold">{activeSpeaker.label}</span>
             </div>
             <p className={`text-xs ${themeClasses.textMuted}`}>{activeSpeaker.detail}</p>
             {activeSpeaker.latestLabel && activeSpeaker.latestTimestamp && (
@@ -245,44 +275,36 @@ export default function CompactWindow() {
                 最新: {activeSpeaker.latestLabel}・{activeSpeaker.latestTimestamp}
               </p>
             )}
-          </div>
+          </section>
 
-          <div className="p-4 space-y-3">
+          <section
+            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
+          >
             <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
               最新の転写
             </p>
             <div
-              className={`rounded-xl border px-3 py-2 min-h-[96px] ${
-                themeClasses.isDark ? 'bg-gray-800 border-gray-700/60' : 'bg-white border-gray-200/70'
-              }`}
+              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2 min-h-[112px]`}
             >
-              <p
-                className={`text-sm leading-relaxed ${themeClasses.text} whitespace-pre-wrap break-words`}
-              >
+              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                 {activeSpeaker.transcriptText}
               </p>
             </div>
-          </div>
+          </section>
 
-          <div
-            className={`p-4 space-y-3 ${
-              themeClasses.isDark ? 'bg-blue-900/30' : 'bg-blue-50'
-            }`}
+          <section
+            className={`rounded-2xl border ${themeClasses.accentBorder} ${themeClasses.accentBg} p-4 space-y-3`}
           >
             <div className="flex items-center justify-between">
-              <p
-                className={`text-xs font-semibold uppercase tracking-wide ${
-                  themeClasses.isDark ? 'text-blue-200' : 'text-blue-700'
-                }`}
-              >
+              <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textLabel}`}>
                 AIの回答
               </p>
               {aiInfo.sourceLabel && (
                 <span
                   className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                     aiInfo.sourceLabel === 'スクリプト'
-                      ? 'bg-green-500/20 text-green-700'
-                      : 'bg-blue-500/20 text-blue-700'
+                      ? 'bg-green-500/20 text-green-700 dark:text-green-200'
+                      : 'bg-blue-500/20 text-blue-700 dark:text-blue-200'
                   }`}
                 >
                   {aiInfo.sourceLabel}
@@ -290,39 +312,24 @@ export default function CompactWindow() {
               )}
             </div>
             <div
-              className={`rounded-xl border px-3 py-2 min-h-[120px] ${
-                themeClasses.isDark
-                  ? 'bg-blue-950/40 border-blue-800/60'
-                  : 'bg-white border-blue-100'
-              }`}
+              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionBg} px-3 py-2 min-h-[140px]`}
             >
-              <p
-                className={`text-sm leading-relaxed whitespace-pre-wrap ${
-                  themeClasses.isDark ? 'text-gray-100' : 'text-gray-900'
-                }`}
-              >
-                {aiInfo.text}
-              </p>
+              <p className="text-sm leading-relaxed whitespace-pre-wrap">{aiInfo.text}</p>
               {aiInfo.timestamp && (
-                <p
-                  className={`text-xs mt-2 text-right ${
-                    themeClasses.isDark ? 'text-blue-200' : 'text-blue-700'
-                  }`}
-                >
+                <p className={`text-xs mt-2 text-right ${themeClasses.textMuted}`}>
                   {aiInfo.timestamp}
                 </p>
               )}
             </div>
             {aiInfo.question && (
-              <p className={`text-xs ${themeClasses.isDark ? 'text-blue-200' : 'text-blue-600'}`}>
-                Q: {aiInfo.question}
-              </p>
+              <p className={`text-xs ${themeClasses.textMuted}`}>Q: {aiInfo.question}</p>
             )}
-          </div>
-        </div>
+          </section>
+        </main>
 
-        <div
-          className={`px-4 py-3 border-t ${themeClasses.border} flex items-center justify-between`}
+        <footer
+          className={`px-5 py-4 border-t ${themeClasses.dividerBorder} ${themeClasses.sectionBg} flex items-center justify-between`}
+          data-tauri-drag-region={false}
         >
           <div className="flex items-center gap-2 text-xs">
             <span
@@ -349,17 +356,19 @@ export default function CompactWindow() {
                   onClick={() =>
                     sendCommand(state.isPaused ? 'resume-recording' : 'pause-recording')
                   }
-                  className={`px-3 py-1.5 text-xs rounded-lg ${
+                  className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                     state.isPaused
                       ? 'bg-blue-600 text-white hover:bg-blue-700'
                       : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
                   }`}
+                  data-tauri-drag-region={false}
                 >
                   {state.isPaused ? '再開' : '一時停止'}
                 </button>
                 <button
                   onClick={() => sendCommand('stop-recording')}
-                  className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600"
+                  className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
+                  data-tauri-drag-region={false}
                 >
                   停止
                 </button>
@@ -367,13 +376,14 @@ export default function CompactWindow() {
             ) : (
               <button
                 onClick={() => sendCommand('start-recording')}
-                className="px-4 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                className="px-4 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                data-tauri-drag-region={false}
               >
                 録音開始
               </button>
             )}
           </div>
-        </div>
+        </footer>
       </div>
     </div>
   );

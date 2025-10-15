@@ -24,6 +24,8 @@ import {
   Maximize2
 } from 'lucide-react';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import type {
   PreparationData,
   Settings as SettingsType,
@@ -65,6 +67,7 @@ const buildDefaultHeaderSummary = (data: PreparationData): string => {
 };
 
 const COMPACT_CHANNEL_NAME = 'compact-view-channel';
+const mainAppWindow = getCurrentWindow();
 
 type CompactCommand =
   | 'start-recording'
@@ -1460,15 +1463,16 @@ const handleStopRecording = () => {
         return;
       }
 
-      const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.set('compactWindow', '1');
+      const isDev = import.meta.env.DEV;
+      const baseUrl = window.location.origin;
+      const compactUrl = isDev ? `${baseUrl}/compact.html` : 'compact.html';
 
       const compact = new WebviewWindow('compact-view', {
-        url: currentUrl.toString(),
-        width: 380,
-        height: 620,
-        minWidth: 340,
-        minHeight: 520,
+        url: compactUrl,
+        width: 360,
+        height: 720,
+        minWidth: 320,
+        minHeight: 560,
         resizable: true,
         decorations: false,
         transparent: true,
@@ -1479,6 +1483,21 @@ const handleStopRecording = () => {
       compactWindowRef.current = compact;
 
       void compact.once('tauri://created', async () => {
+        try {
+          const [mainPosition, mainSize] = await Promise.all([
+            mainAppWindow.outerPosition(),
+            mainAppWindow.outerSize()
+          ]);
+          const margin = 24;
+          const desiredWidth = 360;
+          const targetX = Math.max(mainPosition.x + mainSize.width - desiredWidth - margin, 0);
+          const targetY = Math.max(mainPosition.y + margin, 0);
+
+          await compact.setPosition(new PhysicalPosition(targetX, targetY));
+        } catch (error) {
+          console.warn('⚠️ コンパクトウィンドウの位置調整に失敗しました:', error);
+        }
+
         try {
           await compact.show();
           await compact.setFocus();

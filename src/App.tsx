@@ -3,19 +3,10 @@ import WelcomeView from './components/WelcomeView';
 import MainView from './components/MainView';
 import SettingsView from './components/SettingsView';
 import FunctionTestView from './components/FunctionTestView';
-import CompactWindow from './components/CompactWindow';
 import type { PreparationData, Settings } from './types';
 import { storageService } from './services/storage';
 
 export default function App() {
-  const isCompactWindow =
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('compactWindow') === '1';
-
-  if (isCompactWindow) {
-    return <CompactWindow />;
-  }
-
   const [currentView, setCurrentView] = useState<'welcome' | 'main' | 'settings' | 'functionTest'>('welcome');
   const [preparationData, setPreparationData] = useState<PreparationData>({
     resume: { type: 'none', file: null, text: '' },
