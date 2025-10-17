@@ -598,9 +598,38 @@ ${conversationText}
         });
 
         const utteranceKey = meta?.utteranceKey;
-        const utteranceEntry = utteranceKey
+        let utteranceEntry = utteranceKey
           ? activeUtteranceMapRef.current[utteranceKey]
           : undefined;
+
+        if (
+          utteranceKey &&
+          utteranceEntry &&
+          utteranceEntry.isFinal &&
+          !isFinal
+        ) {
+          const previousSpeaker = utteranceEntry.speaker;
+          const previousTranscriptId = utteranceEntry.transcriptId;
+
+          if (
+            previousSpeaker &&
+            previousTranscriptId &&
+            activeTranscriptMapRef.current[previousSpeaker] === previousTranscriptId
+          ) {
+            delete activeTranscriptMapRef.current[previousSpeaker];
+          }
+
+          if (
+            previousSpeaker &&
+            lastFinalTranscriptRef.current[previousSpeaker]?.messageId === previousTranscriptId
+          ) {
+            delete lastFinalTranscriptRef.current[previousSpeaker];
+          }
+
+          delete activeUtteranceMapRef.current[utteranceKey];
+          utteranceEntry = undefined;
+        }
+
         const previousSpeakerForUtterance = utteranceEntry?.speaker;
 
         if (!trimmedText && isFinal) {
@@ -747,7 +776,9 @@ ${conversationText}
             createdAtMs: eventTimestamp
           };
           resolvedTranscriptId = transcript.id;
-          activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+          if (!isFinal) {
+            activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+          }
           setTranscripts(prev => sortTranscriptsByTimeline([...prev, transcript]));
         }
 
@@ -774,7 +805,11 @@ ${conversationText}
           }
         }
 
-        activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+        if (!isFinal) {
+          activeTranscriptMapRef.current[speaker] = resolvedTranscriptId;
+        } else {
+          delete activeTranscriptMapRef.current[speaker];
+        }
 
         if (utteranceKey) {
           activeUtteranceMapRef.current[utteranceKey] = {

@@ -607,9 +607,38 @@ ${conversationText}
         });
 
         const utteranceKey = meta?.utteranceKey;
-        const utteranceEntry = utteranceKey
+        let utteranceEntry = utteranceKey
           ? activeUtteranceMapRef.current[utteranceKey]
           : undefined;
+
+        if (
+          utteranceKey &&
+          utteranceEntry &&
+          utteranceEntry.isFinal &&
+          !isFinal
+        ) {
+          const previousSpeaker = utteranceEntry.speaker;
+          const previousMessageId = utteranceEntry.messageId;
+
+          if (
+            previousSpeaker &&
+            previousMessageId &&
+            activeMessageMapRef.current[previousSpeaker] === previousMessageId
+          ) {
+            delete activeMessageMapRef.current[previousSpeaker];
+          }
+
+          if (
+            previousSpeaker &&
+            lastFinalInfoRef.current[previousSpeaker]?.messageId === previousMessageId
+          ) {
+            delete lastFinalInfoRef.current[previousSpeaker];
+          }
+
+          delete activeUtteranceMapRef.current[utteranceKey];
+          utteranceEntry = undefined;
+        }
+
         const previousSpeakerForUtterance = utteranceEntry?.speaker;
 
         if (!trimmedText && isFinal) {
@@ -777,7 +806,9 @@ ${conversationText}
             createdAtMs: eventTimestamp
           };
           resolvedMessageId = newMessage.id;
-          activeMessageMapRef.current[speaker] = resolvedMessageId;
+          if (!isFinal) {
+            activeMessageMapRef.current[speaker] = resolvedMessageId;
+          }
           setConversation(prev => sortConversationByTimeline([...prev, newMessage]));
         }
 
@@ -804,7 +835,11 @@ ${conversationText}
           }
         }
 
-        activeMessageMapRef.current[speaker] = resolvedMessageId;
+        if (!isFinal) {
+          activeMessageMapRef.current[speaker] = resolvedMessageId;
+        } else {
+          delete activeMessageMapRef.current[speaker];
+        }
 
         if (utteranceKey) {
           activeUtteranceMapRef.current[utteranceKey] = {
