@@ -63,6 +63,8 @@ export class SonioxSTTService {
   private currentSpeaker: string | null = null;
   private currentFinalTokens: SonioxToken[] = [];
   private currentNonFinalTokens: SonioxToken[] = [];
+  private currentUtteranceId: string | null = null;
+  private utteranceCounter = 0;
   
   // Callbacks
   public onTranscript?: (text: string, isFinal: boolean, speaker?: string, meta?: TranscriptMeta) => void;
@@ -71,6 +73,8 @@ export class SonioxSTTService {
   
   async connect(config: SonioxConfig): Promise<void> {
     this.config = config;
+    this.clearUtteranceState();
+    this.utteranceCounter = 0;
     
     return new Promise((resolve, reject) => {
       try {
@@ -185,8 +189,12 @@ export class SonioxSTTService {
     this.lastAudioSentAt = Date.now();
   }
   
-  private buildTranscriptMeta(tokens: SonioxToken[], text: string): TranscriptMeta | undefined {
-    if (tokens.length === 0 && !text) {
+  private buildTranscriptMeta(
+    tokens: SonioxToken[],
+    text: string,
+    utteranceId?: string
+  ): TranscriptMeta | undefined {
+    if (tokens.length === 0 && !text && !utteranceId) {
       return undefined;
     }
 
@@ -213,7 +221,9 @@ export class SonioxSTTService {
       meta.endMs = endMs;
     }
 
-    if (typeof meta.startMs === 'number' && typeof meta.endMs === 'number') {
+    if (utteranceId) {
+      meta.utteranceKey = utteranceId;
+    } else if (typeof meta.startMs === 'number' && typeof meta.endMs === 'number') {
       meta.utteranceKey = `${Math.round(meta.startMs)}-${Math.round(meta.endMs)}-${text.length}`;
     } else if (text) {
       meta.utteranceKey = `text:${text.length}:${text.slice(0, 16)}`;
@@ -227,8 +237,20 @@ export class SonioxSTTService {
     if (!trimmed || !speaker) {
       return;
     }
-    const meta = this.buildTranscriptMeta(tokens, trimmed);
+    const meta = this.buildTranscriptMeta(tokens, trimmed, this.resolveUtteranceId());
     this.onTranscript?.(trimmed, isFinal, speaker, meta);
+  }
+
+  private resolveUtteranceId(): string {
+    if (!this.currentUtteranceId) {
+      this.utteranceCounter += 1;
+      this.currentUtteranceId = `utt-${Date.now()}-${this.utteranceCounter}`;
+    }
+    return this.currentUtteranceId;
+  }
+
+  private clearUtteranceState(): void {
+    this.currentUtteranceId = null;
   }
   
   private handleResponse(response: SonioxResponse): void {
@@ -254,6 +276,9 @@ export class SonioxSTTService {
         const text = this.currentFinalTokens.map(t => t.text).join('');
         this.emitTranscript(text, true, this.currentSpeaker, this.currentFinalTokens);
       }
+      this.clearUtteranceState();
+      this.currentFinalTokens = [];
+      this.currentNonFinalTokens = [];
       return;
     }
     
@@ -302,11 +327,13 @@ export class SonioxSTTService {
           this.currentSpeaker = token.speaker;
           this.currentFinalTokens = [];
           this.currentNonFinalTokens = [];
+          this.clearUtteranceState();
         }
         
         // 最初のspeaker設定
         if (!this.currentSpeaker) {
           this.currentSpeaker = token.speaker;
+          this.clearUtteranceState();
         }
         
         if (token.is_final) {
@@ -342,11 +369,13 @@ export class SonioxSTTService {
         // 空の転写を送信してUI側に「話し終わった」ことを通知
         if (this.currentSpeaker) {
           console.log(`📤 <end>シグナルをUIに送信: speaker=${this.currentSpeaker}`);
-          this.onTranscript?.('', true, this.currentSpeaker, this.buildTranscriptMeta([], ''));
+          const endingMeta = this.buildTranscriptMeta([], '', this.currentUtteranceId ?? undefined);
+          this.onTranscript?.('', true, this.currentSpeaker, endingMeta);
         }
         // 次のutteranceのために状態をリセット（speakerは保持）
         this.currentFinalTokens = [];
         this.currentNonFinalTokens = [];
+        this.clearUtteranceState();
         console.log('✅ 次のutteranceの準備完了');
       }
     }
@@ -363,6 +392,8 @@ export class SonioxSTTService {
     this.currentFinalTokens = [];
     this.currentNonFinalTokens = [];
     this.responseCount = 0;
+    this.clearUtteranceState();
+    this.utteranceCounter = 0;
   }
   
   isConnected(): boolean {

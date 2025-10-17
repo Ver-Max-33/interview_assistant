@@ -287,75 +287,92 @@ export default function CompactWindow() {
           </button>
         </header>
 
-        <main className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
-          <section
-            className={`rounded-2xl border ${themeClasses.accentBorder} ${themeClasses.accentBg} p-4 space-y-3`}
-          >
-            <div className="flex items-center justify-between">
-              <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textLabel}`}>
-                AIの回答
-              </p>
-              {aiInfo.sourceLabel && (
-                <span
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                    aiInfo.sourceLabel === 'スクリプト'
-                      ? 'bg-green-500/20 text-green-700 dark:text-green-200'
-                      : 'bg-blue-500/20 text-blue-700 dark:text-blue-200'
-                  }`}
+        <main className="flex-1 px-5 py-5 overflow-hidden">
+          <div className="flex h-full flex-col gap-4 overflow-hidden min-h-0">
+            <section
+              className={`rounded-2xl border ${themeClasses.accentBorder} ${themeClasses.accentBg} p-4 flex flex-col gap-3 overflow-hidden flex-[2] min-h-[260px]`}
+            >
+              <div className="flex items-center justify-between">
+                <p
+                  className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textLabel}`}
                 >
-                  {aiInfo.sourceLabel}
-                </span>
-              )}
-            </div>
-            <div
-              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionBg} px-3 py-3 min-h-[200px]`}
-            >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{aiInfo.text}</p>
-              {aiInfo.timestamp && (
-                <p className={`text-xs mt-3 text-right ${themeClasses.textMuted}`}>{aiInfo.timestamp}</p>
-              )}
-            </div>
-            {aiInfo.question && (
-              <p className={`text-xs ${themeClasses.textMuted}`}>Q: {aiInfo.question}</p>
-            )}
-          </section>
-
-          <section
-            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
-          >
-            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
-              最新の転写
-            </p>
-            <div
-              className={`rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2 min-h-[120px]`}
-            >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                {activeSpeaker.transcriptText}
-              </p>
-            </div>
-          </section>
-
-          <section
-            className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 space-y-3`}
-          >
-            <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
-              現在の話者
-            </p>
-            <div className="flex items-center gap-2">
-              <span
-                className={`inline-flex w-2.5 h-2.5 rounded-full ${activeSpeaker.indicatorClass}`}
-              />
-              <div className="flex flex-col">
-                <span className="text-sm font-semibold">{activeSpeaker.label}</span>
-                <span className={`text-xs ${themeClasses.textMuted}`}>{activeSpeaker.detail}</span>
+                  AIの回答
+                </p>
+                {aiInfo.sourceLabel && (
+                  <span
+                    className={`text-[10px] font-semibold px-2.5 py-0.5 rounded-full shadow-sm ${
+                      aiInfo.sourceLabel === 'スクリプト'
+                        ? 'bg-emerald-500 text-white dark:bg-emerald-600'
+                        : 'bg-blue-600 text-white dark:bg-blue-500'
+                    }`}
+                  >
+                    {aiInfo.sourceLabel}
+                  </span>
+                )}
               </div>
-            </div>
-            {activeSpeaker.latestLabel && activeSpeaker.latestTimestamp && (
-              <p className={`text-xs ${themeClasses.textMuted}`}>
-                最新: {activeSpeaker.latestLabel}・{activeSpeaker.latestTimestamp}
+              <div
+                className={`flex-1 min-h-0 overflow-y-auto rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionBg} px-3 py-3`}
+              >
+                <p className="text-[13px] leading-relaxed whitespace-pre-wrap break-words">
+                  {aiInfo.text}
+                </p>
+                {aiInfo.timestamp && (
+                  <p className={`text-xs mt-3 text-right ${themeClasses.textMuted}`}>
+                    {aiInfo.timestamp}
+                  </p>
+                )}
+              </div>
+              {aiInfo.question && (
+                <div
+                  className={`max-h-24 overflow-y-auto rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2`}
+                >
+                  <p className="text-[11px] font-semibold text-blue-600 dark:text-blue-200">
+                    Q.
+                  </p>
+                  <p className="text-[12px] leading-relaxed whitespace-pre-wrap break-words">
+                    {aiInfo.question}
+                  </p>
+                </div>
+              )}
+            </section>
+
+            <section
+              className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} p-4 flex flex-col gap-3 overflow-hidden flex-[1.05] min-h-[140px]`}
+            >
+              <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
+                最新の転写
               </p>
-            )}
-          </section>
+              <div
+                className={`flex-1 min-h-0 overflow-y-auto rounded-xl border ${themeClasses.subtleBorder} ${themeClasses.sectionSubtleBg} px-3 py-2`}
+              >
+                <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                  {activeSpeaker.transcriptText}
+                </p>
+              </div>
+            </section>
+
+            <section
+              className={`rounded-2xl border ${themeClasses.sectionBorder} ${themeClasses.sectionBg} px-4 py-3 flex flex-col gap-2 flex-[0.6] min-h-[110px]`}
+            >
+              <p className={`text-xs font-semibold uppercase tracking-wide ${themeClasses.textMuted}`}>
+                現在の話者
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`inline-flex w-2.5 h-2.5 rounded-full ${activeSpeaker.indicatorClass}`}
+                />
+                <div className="flex flex-col">
+                  <span className="text-sm font-semibold">{activeSpeaker.label}</span>
+                  <span className={`text-xs ${themeClasses.textMuted}`}>{activeSpeaker.detail}</span>
+                </div>
+              </div>
+              {activeSpeaker.latestLabel && activeSpeaker.latestTimestamp && (
+                <p className={`text-xs ${themeClasses.textMuted}`}>
+                  最新: {activeSpeaker.latestLabel}・{activeSpeaker.latestTimestamp}
+                </p>
+              )}
+            </section>
+          </div>
         </main>
 
         <footer
