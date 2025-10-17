@@ -36,6 +36,7 @@ import { sonioxService, type TranscriptMeta } from '../services/soniox';
 import { llmService, type LLMMessage } from '../services/llm';
 import { audioCaptureService } from '../services/audio-capture';
 import { scriptMatcher } from '../services/script-matcher';
+import { ContextManager } from '../services/context-manager';
 import { buildSystemPrompt } from '../utils/prompt-builder';
 import { storageService } from '../services/storage';
 import { extractKeywords } from '../utils/keywords';
@@ -167,6 +168,8 @@ export default function MainView({
     >
   >({});
   const headerSummaryGeneratedRef = useRef<boolean>(false);
+  const contextManagerRef = useRef<ContextManager | null>(null);
+  const conversationRef = useRef<Message[]>([]);
 
   const keywords = useMemo(() => extractKeywords(preparationData), [preparationData]);
 
@@ -325,11 +328,17 @@ export default function MainView({
 
       scriptMatcher
         .initialize(preparationData.interviewScript.text, apiKey)
-        .then(() => console.log('✅ 面接稿の初期化完了'))
+        .then(() => {
+          console.log('✅ 面接稿の初期化完了');
+          contextManagerRef.current?.setScriptChunks(scriptMatcher.getQAList());
+        })
         .catch(err => console.error('❌ 面接稿の初期化に失敗しました:', err));
     } else if (preparationData.interviewScript.type === 'file') {
       console.warn('⚠️ PDFアップロードが選択されていますが、内容が読み取られていません');
       console.warn('💡 PDF解析機能は未実装です。「手動入力」を使用してください');
+      contextManagerRef.current?.setScriptChunks([]);
+    } else {
+      contextManagerRef.current?.setScriptChunks([]);
     }
 
   }, [preparationData, settings]);
@@ -343,6 +352,33 @@ export default function MainView({
   useEffect(() => {
     storageService.clearSession();
   }, []);
+
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
+
+  useEffect(() => {
+    const maxTokens = settings.llmSettings?.maxTokens;
+    const computedMaxChars =
+      typeof maxTokens === 'number' && maxTokens > 0
+        ? Math.min(15000, Math.max(6000, maxTokens * 6))
+        : 9000;
+
+    const manager = new ContextManager({
+      maxTotalCharacters: computedMaxChars,
+      conversationTurnLimit: 6,
+      recentChunkMemory: 4
+    });
+
+    manager.initialize(preparationData);
+    manager.setScriptChunks(scriptMatcher.getQAList());
+    contextManagerRef.current = manager;
+
+    console.log('🧠 コンテキストマネージャ初期化', {
+      maxChars: computedMaxChars,
+      scriptChunks: scriptMatcher.getQAList().length
+    });
+  }, [preparationData, settings.llmSettings.maxTokens]);
 
   useEffect(() => {
     let frame = 0;
@@ -1017,22 +1053,46 @@ const handleStopRecording = () => {
     }
   };
 
-  const generateAIAnswer = async (question: string): Promise<string> => {
-    const systemPrompt = buildSystemPrompt(preparationData, settings.aiSettings);
+  const generateAIAnswer = useCallback(
+    async (question: string): Promise<string> => {
+      let contextSnapshot = '';
+      const manager = contextManagerRef.current;
 
-    const messages: LLMMessage[] = [
-      {
-        role: 'system',
-        content: systemPrompt
-      },
-      {
-        role: 'user',
-        content: `面接官の質問: ${question}\n\n5W1H原則に基づいて、自然で簡潔な日本語で回答を生成してください。`
+      if (manager) {
+        const snapshot = manager.buildSnapshot({
+          question,
+          conversation: conversationRef.current
+        });
+        contextSnapshot = snapshot.context;
+        console.log('🗂️ LLMコンテキスト', {
+          questionPreview: question.slice(0, 40),
+          usedChunks: snapshot.usedChunkIds,
+          totalChars: snapshot.totalChars,
+          truncated: snapshot.truncated
+        });
       }
-    ];
 
-    return llmService.generateResponse(messages);
-  };
+      const systemPrompt = buildSystemPrompt(
+        preparationData,
+        settings.aiSettings,
+        contextSnapshot
+      );
+
+      const messages: LLMMessage[] = [
+        {
+          role: 'system',
+          content: systemPrompt
+        },
+        {
+          role: 'user',
+          content: `面接官の質問: ${question}\n\n5W1H原則に基づいて、自然で簡潔な日本語で回答を生成してください。`
+        }
+      ];
+
+      return llmService.generateResponse(messages);
+    },
+    [preparationData, settings.aiSettings]
+  );
 
   const collectScriptCandidates = useCallback((question: string) => {
     const entries = scriptMatcher.getQAList();

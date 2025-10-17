@@ -2,7 +2,8 @@ import type { PreparationData, AISettings } from '../types';
 
 export function buildSystemPrompt(
   data: PreparationData,
-  aiSettings: AISettings
+  aiSettings: AISettings,
+  contextSnapshot?: string
 ): string {
   const lengthInstructions = {
     brief: '3-4文（約100-150字）',
@@ -15,6 +16,26 @@ export function buildSystemPrompt(
     normal: '2つの具体例',
     many: '3つ以上の具体例'
   };
+
+  const profileSummary = JSON.stringify(
+    {
+      industry: data.industry,
+      company: data.company,
+      position: data.position.text
+    },
+    null,
+    2
+  );
+
+  const resolvedContext =
+    contextSnapshot && contextSnapshot.trim().length > 0
+      ? contextSnapshot
+      : `{
+  "context_version": 1,
+  "pending_question": "",
+  "conversation_window": [],
+  "knowledge_chunks": []
+}`;
 
   return `
 あなたは日本の転職面接のプロフェッショナルアシスタントです。
@@ -35,6 +56,19 @@ export function buildSystemPrompt(
 ✅ 「〜について」「〜に関して」
 ✅ 「〜です」「〜ました」
 
+# 応募者基本情報（要約）
+${profileSummary}
+
+# 動的コンテキスト(JSON形式)
+${resolvedContext}
+
+# コンテキスト利用方法
+- JSON内の "knowledge_chunks" に履歴書・職務経歴書・面接稿などの情報がチャンクとして格納されています
+- type が "interview_script" のチャンクは面接稿です。該当する場合は "answer" を一字一句変更せずにそのまま出力してください
+- その他のチャンク（履歴書・職務経歴書など）は "content" から必要な情報だけを抜き出し、自然な文章に整えてください
+- "conversation_window" には直近の対話が含まれます。矛盾が生まれないよう整合性を保ってください
+- "pending_question" は現在対応すべき面接官の質問です
+
 # 5W1H原則
 - When（いつ）：時期、期間を明確に
 - Where（どこで）：場所、環境を具体的に
@@ -43,48 +77,12 @@ export function buildSystemPrompt(
 - Why（なぜ）：理由、動機、目的を明確に
 - How（どのように）：方法、プロセス、工夫した点
 
-# 応募者情報
-- 所属業界: ${data.industry}
-- 面接企業: ${data.company}
-
-# 履歴書
-${data.resume.text 
-  ? data.resume.text 
-  : data.resume.type === 'file' && data.resume.file 
-    ? `[PDF: ${data.resume.file.name} - テキスト抽出失敗]` 
-    : '[未入力]'}
-
-# 職務経歴書
-${data.careerHistory.text 
-  ? data.careerHistory.text 
-  : data.careerHistory.type === 'file' && data.careerHistory.file 
-    ? `[PDF: ${data.careerHistory.file.name} - テキスト抽出失敗]` 
-    : '[未入力]'}
-
-# 応募職種
-${data.position.text 
-  ? data.position.text 
-  : data.position.type === 'file' && data.position.file 
-    ? `[PDF: ${data.position.file.name} - テキスト抽正失敗]` 
-    : '[未入力]'}
-
-${data.companyResearch.type !== 'none' ? `
-# 企業研究
-${data.companyResearch.text 
-  ? data.companyResearch.text 
-  : data.companyResearch.type === 'file' && data.companyResearch.file 
-    ? `[PDF: ${data.companyResearch.file.name} - テキスト抽出失敗]` 
-    : '[未入力]'}
-` : ''}
-
-# 面接稿（絶対優先・そのまま使用）
-<interview_script>
-${data.interviewScript.text 
-  ? data.interviewScript.text 
-  : data.interviewScript.type === 'file' && data.interviewScript.file 
-    ? `[PDF: ${data.interviewScript.file.name} - テキスト抽出失敗]` 
-    : '[未入力]'}
-</interview_script>
+# 利用可能な資料
+- 履歴書: ${data.resume.type === 'none' ? '未入力' : '提供済み（knowledge_chunks を参照）'}
+- 職務経歴書: ${data.careerHistory.type === 'none' ? '未入力' : '提供済み（knowledge_chunks を参照）'}
+- 応募職種: ${data.position.type === 'none' ? '未入力' : '提供済み（knowledge_chunks を参照）'}
+- 企業研究: ${data.companyResearch.type === 'none' ? '未入力' : '提供済み（knowledge_chunks を参照）'}
+- 面接稿: ${data.interviewScript.type === 'none' ? '未入力' : '提供済み（type: "interview_script" のチャンク）'}
 
 # 回答生成ルール（厳守）
 
@@ -92,7 +90,7 @@ ${data.interviewScript.text
 
 ### ステップ1: 面接稿のマッチング確認
 
-面接官の質問が以下に該当するか確認：
+面接官の質問が以下に該当するか確認してください。該当するチャンクは "knowledge_chunks" 内の type: "interview_script" です。
 
 **マッチング判定基準：**
 1. **核心的な意図が同じ**（言い回しが違っても、聞きたいことが同じ）
@@ -124,38 +122,10 @@ ${data.interviewScript.text
 ❌ 順序を入れ替える
 
 **✅ 正しい処理：**
-1. 面接稿の<interview_script>タグ内を確認
-2. マッチする「Q:」を見つける
-3. その直後の「回答:」または「A:」以降のテキストを探す
-4. **その回答テキストを一字一句、完全にコピーして出力**
-5. 他に何も追加しない（説明、補足、アドバイス等も不要）
-
-**例：**
-\`\`\`
-面接稿：
-Q: 前職の仕事内容は？
-回答:
-はい、自動運転システムの認識システム開発を担当していました。
-具体的には深層学習モデルの開発や精度向上に取り組んでいました。
-
-面接官の質問：「前職ではどんな仕事をされていましたか？」
-
-✅ 正解の出力：
-はい、自動運転システムの認識システム開発を担当していました。
-具体的には深層学習モデルの開発や精度向上に取り組んでいました。
-
-❌ 間違い例1（情報追加）：
-はい、愛知県豊田市で自動運転システムの認識システム開発を担当していました。
-[「愛知県豊田市」を勝手に追加している]
-
-❌ 間違い例2（情報削除）：
-はい、自動運転システムの認識システム開発を担当していました。
-[2段落目を削除している]
-
-❌ 間違い例3（言い換え）：
-はい、自動運転システムの中でも「認識システム」の開発を担当しておりました。
-[「担当していました」を「担当しておりました」に変更している]
-\`\`\`
+1. "knowledge_chunks" から type: "interview_script" のチャンクを探す
+2. "question" が面接官の質問と同じ意図か確認する
+3. 該当する場合は "answer" フィールドのテキストを一字一句変更せずにそのまま出力する
+4. 説明・補足・アドバイスなどは一切追加しない
 
 ### ステップ3: マッチしない場合のみ新規生成
 
