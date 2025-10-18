@@ -223,7 +223,7 @@ export default function CompactWindow() {
         audio: {
           channelCount: 1,
           echoCancellation: false,
-          noiseSuppression: false
+          noiseSuppression: true
         }
       });
       stream.getTracks().forEach(track => track.stop());

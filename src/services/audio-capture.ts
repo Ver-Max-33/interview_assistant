@@ -41,8 +41,8 @@ export class AudioCaptureService {
         audio: {
           // システムオーディオをキャプチャするため、エコーキャンセルを無効化
           echoCancellation: false,
-          // ノイズ抑制も無効化（システムオーディオを保持するため）
-          noiseSuppression: false,
+          // ノイズ抑制は設定に従う（環境雑音を軽減したい場合は有効化）
+          noiseSuppression: config.noiseSuppression,
           // 自動ゲイン制御は有効のまま
           autoGainControl: config.autoGainControl,
           // サンプルレートを明示的に指定

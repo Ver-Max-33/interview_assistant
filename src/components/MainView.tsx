@@ -937,7 +937,7 @@ ${conversationText}
       await audioCaptureService.start({
         sampleRate: 24000,
         echoCancellation: false,
-        noiseSuppression: false,
+        noiseSuppression: true,
         autoGainControl: true
       });
 

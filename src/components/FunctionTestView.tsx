@@ -941,7 +941,7 @@ ${conversationText}
       await audioCaptureService.start({
         sampleRate: 24000,
         echoCancellation: false, // システムオーディオをキャプチャするため無効化
-        noiseSuppression: false,  // システムオーディオをキャプチャするため無効化
+        noiseSuppression: true,  // システムオーディオをキャプチャするため無効化
         autoGainControl: true
       });
 
