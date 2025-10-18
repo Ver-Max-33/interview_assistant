@@ -284,10 +284,12 @@ export class SonioxSTTService {
     
     // トークン処理
     if (response.tokens && response.tokens.length > 0) {
+      const previousNonFinalTokens = this.currentNonFinalTokens;
       const newFinalTokens: SonioxToken[] = [];
       const newNonFinalTokens: SonioxToken[] = [];
       
       let hasEndToken = false;
+      let promotedFromNonFinal = false;
       
       response.tokens.forEach(token => {
         // <end>タグの検出（utterance終了の信号）
@@ -311,6 +313,22 @@ export class SonioxSTTService {
           console.log(`🔧 Speaker標準化: "${token.speaker}" → "${normalizedSpeaker}"`);
         }
         token.speaker = normalizedSpeaker;
+        
+        const trimmedTokenText = token.text.trim();
+        const hasPendingContent =
+          this.currentFinalTokens.length > 0 || this.currentNonFinalTokens.length > 0;
+        const originalSpeaker = token.speaker;
+        if (
+          this.currentSpeaker &&
+          originalSpeaker !== this.currentSpeaker &&
+          trimmedTokenText.length === 0 &&
+          hasPendingContent
+        ) {
+          console.log(
+            `⚠️ 空白トークンによる話者変更を無視: ${this.currentSpeaker} ← ${originalSpeaker}`
+          );
+          token.speaker = this.currentSpeaker;
+        }
         
         // Speaker変更チェック
         if (this.currentSpeaker && token.speaker !== this.currentSpeaker) {
@@ -347,9 +365,24 @@ export class SonioxSTTService {
       
       // 現在のspeakerのtokensを更新
       if (newFinalTokens.length > 0) {
+        const newFinalText = newFinalTokens.map(token => token.text).join('');
+        if (!newFinalText.trim() && previousNonFinalTokens.length > 0) {
+          const promotedTokens = previousNonFinalTokens.map(token => ({
+            ...token,
+            is_final: true
+          }));
+          this.currentFinalTokens.push(...promotedTokens);
+          promotedFromNonFinal = true;
+        }
         this.currentFinalTokens.push(...newFinalTokens);
       }
-      this.currentNonFinalTokens = newNonFinalTokens; // Non-finalは毎回リセット
+      if (newNonFinalTokens.length > 0) {
+        this.currentNonFinalTokens = newNonFinalTokens;
+      } else if (promotedFromNonFinal || newFinalTokens.length > 0) {
+        this.currentNonFinalTokens = [];
+      } else {
+        this.currentNonFinalTokens = previousNonFinalTokens;
+      }
       
       // 進行中の発話を送信（non-final含む）
       const allTokens = [...this.currentFinalTokens, ...this.currentNonFinalTokens];
@@ -366,6 +399,23 @@ export class SonioxSTTService {
       // <end>タグが検出された場合の処理
       if (hasEndToken) {
         console.log('🔚 <end>タグ処理: utterance完了、状態をリセット');
+        if (
+          this.currentSpeaker &&
+          this.currentNonFinalTokens.length > 0
+        ) {
+          const promotedTokens = this.currentNonFinalTokens.map(token => ({
+            ...token,
+            is_final: true
+          }));
+          this.currentFinalTokens.push(...promotedTokens);
+          this.currentNonFinalTokens = [];
+
+          const finalizedText = this.currentFinalTokens.map(token => token.text).join('');
+          if (finalizedText.trim().length > 0) {
+            console.log(`📤 非finalトークンを最終確定として送信: "${finalizedText.substring(0, 50)}${finalizedText.length > 50 ? '...' : ''}"`);
+            this.emitTranscript(finalizedText, true, this.currentSpeaker, this.currentFinalTokens);
+          }
+        }
         // 空の転写を送信してUI側に「話し終わった」ことを通知
         if (this.currentSpeaker) {
           console.log(`📤 <end>シグナルをUIに送信: speaker=${this.currentSpeaker}`);
